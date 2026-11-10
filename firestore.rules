@@ -1,0 +1,41 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Disposable Addresses & Rendezvous Calling
+    match /addresses/{addressId} {
+      // 1. Prevent enumeration/scraping of all addresses
+      allow list: if false;
+
+      // 2. Allow looking up or registering an address
+      allow get, create, update, delete: if true;
+
+      // 3. Subcollection for incoming/outgoing calls under an address
+      match /calls/{callId} {
+        allow read, write: if true;
+
+        match /callerCandidates/{candidateId} {
+          allow read, write: if true;
+        }
+
+        match /calleeCandidates/{candidateId} {
+          allow read, write: if true;
+        }
+      }
+    }
+
+    // Direct room signaling support
+    match /rooms/{roomId} {
+      allow list: if false;
+      allow get, create, update, delete: if true;
+
+      match /callerCandidates/{candidateId} {
+        allow read, write: if true;
+      }
+
+      match /calleeCandidates/{candidateId} {
+        allow read, write: if true;
+      }
+    }
+  }
+}

@@ -1,0 +1,50 @@
+flowchart TD
+    subgraph AtRest["1. At-Rest Vault & Key Unwrapping"]
+        PW["User Passphrase + 16-byte Salt"] --> ARGON["Argon2id KDF<br/>(64MB RAM, 2 iterations, 1 lane)"]
+        ARGON --> VK["256-bit Vault Key"]
+        DISK_VAULT["Local Storage (SharedPreferences)"] -->|"Wrapped Blobs"| UNWRAP["AES-256-GCM Unwrap"]
+        VK --> UNWRAP
+        UNWRAP --> IK_A["Long-Term Identity Key (X25519)"]
+        UNWRAP --> S1["Local Cache Share s1 (32 bytes)"]
+    end
+
+    subgraph Signaling["2. Decoupled Rendezvous Signaling"]
+        ADDR["Disposable Address Token<br/>'bored_64bitEntropy'"] --> FS["Cloud Firestore Signaling<br/>(Anti-enumeration: allow list: false)"]
+        FS --> SDP["WebRTC SDP Offer / Answer + STUN ICE"]
+        SDP --> P2P_CONN["Direct P2P WebRTC DataChannel"]
+    end
+
+    subgraph Handshake["3. Deniable Triple-DH (3DH) Handshake"]
+        P2P_CONN --> GEN_EPHEM["Generate Fresh Ephemeral Key Pair (ek_A, EK_A)"]
+        GEN_EPHEM --> WIRE_3DH["Exchange (IK, EK) over DataChannel<br/>(Zero Digital Signatures)"]
+        WIRE_3DH --> COMPUTE_DH["Compute 3 Diffie-Hellman Agreements:<br/>DH1 = DH(ik_A, EK_B)<br/>DH2 = DH(ek_A, IK_B)<br/>DH3 = DH(ek_A, EK_B)"]
+        COMPUTE_DH --> HKDF_DH["HKDF-SHA256(DH1 || DH2 || DH3, Transcript)"]
+        HKDF_DH --> K_SESS["32-byte Session Key (K_session)"]
+    end
+
+    subgraph Presence["4. 2-of-2 Presence-Enforced Cache Reconstruction"]
+        K_SESS --> SHARE_SWAP["Swap Local Share s1 over Channel"]
+        SHARE_SWAP --> RECONSTRUCT["XOR Secret Reconstruction:<br/>K = s1 ⊕ s2 (in RAM only)"]
+        RECONSTRUCT --> HIST_DEC["Decrypt Offline History (AES-256-GCM under K)"]
+    end
+
+    subgraph Messaging["5. Per-Message Encryption & OTR MAC Disclosure"]
+        MSG["New Outgoing Message"] --> HKDF_MSG["HKDF Derivation for Seq i:<br/>K_enc,i = HKDF(K_session, seq:i)<br/>K_mac,i = HKDF(K_session, seq:i)"]
+        HKDF_MSG --> AES_MSG["AES-256-GCM Encryption (K_enc,i)"]
+        AES_MSG --> HMAC_MSG["Outer HMAC-SHA256 (K_mac,i)"]
+        HMAC_MSG --> WIRE_PKT["Deniable Wire Packet:<br/>Ciphertext + Nonce + Tag + HMAC +<br/>Disclosed MAC Key from Msg (i-1)"]
+        RECONSTRUCT --> APPEND_CACHE["Append Message to History<br/>Encrypted under K at rest"]
+    end
+
+    subgraph Teardown["6. Session Teardown & RAM Zeroization"]
+        DISCONNECT["Disconnect / Tab Close / Leave Room"] --> ZERO_K["Overwriting K with 0s in RAM"]
+        DISCONNECT --> ZERO_S2["Overwriting Remote Share s2 with 0s"]
+        DISCONNECT --> ZERO_EPHEM["Zeroize Ephemeral Key Pair"]
+        ZERO_K --> SECURE_REST["Disk History Reverts to Unbreakable Ciphertext<br/>(Information-Theoretic Security)"]
+    end
+
+    AtRest --> Signaling
+    Signaling --> Handshake
+    Handshake --> Presence
+    Presence --> Messaging
+    Messaging --> Teardown

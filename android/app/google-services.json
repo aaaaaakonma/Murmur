@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "493907665220",
+    "project_id": "murmur-b7430",
+    "storage_bucket": "murmur-b7430.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:493907665220:android:1a3090457b49ecff2e7711",
+        "android_client_info": {
+          "package_name": "com.bored.chat.bored_p2p_chat"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBO4G_xZwmZTTV4S7CViW4PT3DtNUHgSOQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

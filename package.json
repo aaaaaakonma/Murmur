@@ -1,0 +1,19 @@
+{
+  "name": "murmur-mesh-chat",
+  "version": "1.0.0",
+  "description": "Murmur — Mission-Critical Direct Mesh P2P Chat",
+  "scripts": {
+    "build": "bash vercel-build.sh",
+    "deploy": "npx vercel build/web --prod"
+  },
+  "keywords": [
+    "flutter",
+    "webrtc",
+    "p2p",
+    "e2ee",
+    "mesh",
+    "cryptography"
+  ],
+  "author": "",
+  "license": "UNLICENSED"
+}
