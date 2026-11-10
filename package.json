@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Murmur — Mission-Critical Direct Mesh P2P Chat",
   "scripts": {
-    "build": "bash vercel-build.sh",
+    "build:local": "flutter build web --release",
     "deploy": "npx vercel build/web --prod"
   },
   "keywords": [
