@@ -9,8 +9,9 @@ flowchart TD
     end
 
     subgraph Signaling["2. Decoupled Rendezvous Signaling"]
-        ADDR["Disposable Address Token<br/>'bored_64bitEntropy'"] --> FS["Cloud Firestore Signaling<br/>(Anti-enumeration: allow list: false)"]
-        FS --> SDP["WebRTC SDP Offer / Answer + STUN ICE"]
+        ADDR["Disposable Address Token<br/>'bored_64bitEntropy'"] --> POW["12-bit Proof-of-Work (PoW)<br/>+ Token Bucket Rate Limiter"]
+        POW --> FS["Cloud Firestore Signaling<br/>(Hardened rules: allow list: false)"]
+        FS --> SDP["WebRTC SDP Offer / Answer + STUN ICE (Size-capped)"]
         SDP --> P2P_CONN["Direct P2P WebRTC DataChannel"]
     end
 
@@ -28,8 +29,9 @@ flowchart TD
         RECONSTRUCT --> HIST_DEC["Decrypt Offline History (AES-256-GCM under K)"]
     end
 
-    subgraph Messaging["5. Per-Message Encryption & OTR MAC Disclosure"]
-        MSG["New Outgoing Message"] --> HKDF_MSG["HKDF Derivation for Seq i:<br/>K_enc,i = HKDF(K_session, seq:i)<br/>K_mac,i = HKDF(K_session, seq:i)"]
+    subgraph Messaging["5. Deniable Messaging & Chunked Media Transfer"]
+        MSG["Text Message / 20MB Media File"] --> CHUNK["16 KB Safe Chunking Pipeline"]
+        CHUNK --> HKDF_MSG["HKDF Derivation for Seq i:<br/>K_enc,i = HKDF(K_session, seq:i)<br/>K_mac,i = HKDF(K_session, seq:i)"]
         HKDF_MSG --> AES_MSG["AES-256-GCM Encryption (K_enc,i)"]
         AES_MSG --> HMAC_MSG["Outer HMAC-SHA256 (K_mac,i)"]
         HMAC_MSG --> WIRE_PKT["Deniable Wire Packet:<br/>Ciphertext + Nonce + Tag + HMAC +<br/>Disclosed MAC Key from Msg (i-1)"]
@@ -37,9 +39,10 @@ flowchart TD
     end
 
     subgraph Teardown["6. Session Teardown & RAM Zeroization"]
-        DISCONNECT["Disconnect / Tab Close / Leave Room"] --> ZERO_K["Overwriting K with 0s in RAM"]
-        DISCONNECT --> ZERO_S2["Overwriting Remote Share s2 with 0s"]
+        DISCONNECT["Disconnect / Tab Close / Leave Room / PEER_LEFT"] --> ZERO_K["Overwrite K with 0s in RAM"]
+        DISCONNECT --> ZERO_S2["Overwrite Remote Share s2 with 0s"]
         DISCONNECT --> ZERO_EPHEM["Zeroize Ephemeral Key Pair"]
+        DISCONNECT --> ZERO_RAM["Purge & Zeroize Messages & Media Buffers (0x00 fill)"]
         ZERO_K --> SECURE_REST["Disk History Reverts to Unbreakable Ciphertext<br/>(Information-Theoretic Security)"]
     end
 

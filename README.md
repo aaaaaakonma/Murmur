@@ -106,8 +106,8 @@ sequenceDiagram
 
     Note over Alice, Bob: 6. Instant Disconnect & RAM Zeroization
     Alice->>Bob: PEER_LEFT Wire Packet
-    Alice->>Alice: fillRange(0) over K, s2, media buffers; purge RAM
-    Bob->>Bob: fillRange(0) over K, s1, media buffers; purge RAM
+    Alice->>Alice: fillRange(0) over K, s2, media buffers, and purge RAM
+    Bob->>Bob: fillRange(0) over K, s1, media buffers, and purge RAM
     Note over Alice, Bob: Presence Terminated: UI locks to encrypted standby
 ```
 

@@ -1,17 +1,18 @@
-autonumber
+sequenceDiagram
+    autonumber
     participant Alice as Alice (Initiator)
     participant Firestore as Firestore Signaling
     participant Bob as Bob (Responder)
 
     Note over Alice, Bob: 1. Passphrase Vault Unlock
-    Alice->>Alice: Argon2id unwrap: Local Identity IK_A & Share Share_A
-    Bob->>Bob: Argon2id unwrap: Local Identity IK_B & Share Share_B
+    Alice->>Alice: Argon2id unwrap: Local Identity IK_A & Share s1
+    Bob->>Bob: Argon2id unwrap: Local Identity IK_B & Share s2
 
-    Note over Alice, Firestore: 2. Decoupled Rendezvous
-    Alice->>Firestore: Post SDP Offer & ICE to Bob's disposable alias
-    Firestore->>Bob: Incoming call detected on address
-    Bob->>Firestore: Post SDP Answer & ICE candidates
-    Alice->>Bob: Direct WebRTC RTCDataChannel opened (bypass Firestore)
+    Note over Alice, Firestore: 2. Decoupled Rendezvous (PoW & Rate-Limited)
+    Alice->>Firestore: Solve PoW & Post SDP Offer + ICE to Bob's disposable alias
+    Firestore->>Bob: Incoming call detected (Triggers Web/Mobile Notification chime)
+    Bob->>Firestore: Solve PoW & Post SDP Answer + ICE candidates
+    Alice->>Bob: Direct WebRTC RTCDataChannel opened (bypasses Firestore)
 
     Note over Alice, Bob: 3. Deniable Triple-DH (3DH)
     Alice->>Bob: 3DH_HANDSHAKE: { IK_A, EK_A } (No signatures!)
@@ -20,17 +21,20 @@ autonumber
     Bob->>Bob: K_session = HKDF(DH(ek_B,IK_A) || DH(ik_B,EK_A) || DH(ek_B,EK_A))
 
     Note over Alice, Bob: 4. 2-of-2 Presence Activation
-    Alice->>Bob: SHARE_SWAP: Share_A
-    Bob->>Alice: SHARE_SWAP: Share_B
-    Alice->>Alice: Reconstruct K = Share_A ⊕ Share_B in RAM (Decrypt past history)
-    Bob->>Bob: Reconstruct K = Share_A ⊕ Share_B in RAM (Decrypt past history)
+    Alice->>Bob: SHARE_SWAP: s1
+    Bob->>Alice: SHARE_SWAP: s2
+    Alice->>Alice: Reconstruct K = s1 ⊕ s2 in RAM (Decrypt past history)
+    Bob->>Bob: Reconstruct K = s1 ⊕ s2 in RAM (Decrypt past history)
 
-    Note over Alice, Bob: 5. Message Exchange & OTR MAC Publication
+    Note over Alice, Bob: 5. Message & Media Exchange (OTR MAC Publication)
     Alice->>Bob: DENIABLE_MSG #1 (Encrypted with K_enc,1, Authenticated with K_mac,1)
     Bob->>Bob: Verify HMAC(K_mac,1) & Decrypt AES-GCM
-    Alice->>Bob: DENIABLE_MSG #2 (Encrypted with K_enc,2&#59; Discloses K_mac,1)
+    Alice->>Bob: FILE_TRANSFER_START + FILE_TRANSFER_CHUNK (Discloses K_mac,1)
     Note over Alice, Bob: Universal Repudiation: Anyone can now forge Message #1 with K_mac,1
+    Bob->>Bob: Verify Chunks, Reassemble File & Verify SHA-256
 
-    Note over Alice, Bob: 6. Disconnect & RAM Zeroization
-    Alice->>Alice: fillRange(0) over K and Share_B&#59; drop ephemeral keys
-    Bob->>Bob: fillRange(0) over K and Share_A&#59; drop ephemeral keys
+    Note over Alice, Bob: 6. Instant Disconnect & RAM Zeroization
+    Alice->>Bob: PEER_LEFT Wire Packet
+    Alice->>Alice: fillRange(0) over K, s2, media buffers, and purge RAM
+    Bob->>Bob: fillRange(0) over K, s1, media buffers, and purge RAM
+    Note over Alice, Bob: Presence Terminated: UI locks to encrypted standby
