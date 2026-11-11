@@ -1,12 +1,13 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'web_notification_helper.dart';
 
 typedef NotificationTapCallback = void Function(String? payload);
 
 /// Manages cross-platform (Web & Android) blind notifications for Murmur.
 /// Supports zero-knowledge envelope notifications when vault is locked,
-/// and contact-resolved notifications when vault is unlocked.
+/// contact-resolved notifications when vault is unlocked, and browser Notification API.
 class NotificationService {
   static final NotificationService _instance = NotificationService._internal();
   factory NotificationService() => _instance;
@@ -18,6 +19,9 @@ class NotificationService {
   bool _isInitialized = false;
   NotificationTapCallback? onNotificationTapped;
 
+  /// Reactive state for permission: 'default', 'granted', 'denied', 'unsupported'
+  final ValueNotifier<String> permissionState = ValueNotifier<String>('default');
+
   static const String channelId = 'murmur_inbound_calls';
   static const String channelName = 'Inbound Encrypted Connections';
   static const String channelDesc =
@@ -26,6 +30,13 @@ class NotificationService {
   Future<void> initialize({NotificationTapCallback? onTap}) async {
     if (_isInitialized) return;
     onNotificationTapped = onTap;
+
+    if (kIsWeb) {
+      permissionState.value = WebNotificationHelper.permissionStatus;
+      _isInitialized = true;
+      debugPrint('[Notification] Web Notification initialized. Status: ${permissionState.value}');
+      return;
+    }
 
     // Android settings (using app launcher icon)
     const AndroidInitializationSettings androidSettings =
@@ -75,7 +86,8 @@ class NotificationService {
         );
 
         await androidImplementation.createNotificationChannel(channel);
-        await androidImplementation.requestNotificationsPermission();
+        final granted = await androidImplementation.areNotificationsEnabled();
+        permissionState.value = (granted ?? false) ? 'granted' : 'default';
       }
 
       _isInitialized = true;
@@ -85,23 +97,50 @@ class NotificationService {
     }
   }
 
-  /// Request notification permissions (useful for prompt on user action)
+  /// Request notification permissions (called from user-facing prompt or action)
   Future<bool> requestPermissions() async {
     try {
-      if (!kIsWeb) {
+      if (kIsWeb) {
+        final result = await WebNotificationHelper.requestPermission();
+        permissionState.value = result;
+        debugPrint('[Notification] Web requestPermission result: $result');
+        return result == 'granted';
+      } else {
         final androidImplementation = _notificationsPlugin
             .resolvePlatformSpecificImplementation<
                 AndroidFlutterLocalNotificationsPlugin>();
         if (androidImplementation != null) {
           final granted =
               await androidImplementation.requestNotificationsPermission();
-          return granted ?? false;
+          final isGranted = granted ?? false;
+          permissionState.value = isGranted ? 'granted' : 'denied';
+          return isGranted;
         }
       }
       return true;
     } catch (e) {
       debugPrint('[Notification] Permission request error: $e');
       return false;
+    }
+  }
+
+  /// Check current permission status
+  Future<String> getPermissionStatus() async {
+    if (kIsWeb) {
+      final status = WebNotificationHelper.permissionStatus;
+      permissionState.value = status;
+      return status;
+    } else {
+      final androidImplementation = _notificationsPlugin
+          .resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin>();
+      if (androidImplementation != null) {
+        final granted = await androidImplementation.areNotificationsEnabled();
+        final status = (granted ?? false) ? 'granted' : 'denied';
+        permissionState.value = status;
+        return status;
+      }
+      return 'granted';
     }
   }
 
@@ -128,6 +167,19 @@ class NotificationService {
         : (callerAlias != null
             ? '$callerAlias is requesting a direct Triple-DH session. Tap to answer.'
             : 'Inbound direct session request on $addressId. Tap to answer.');
+
+    if (kIsWeb) {
+      // Trigger Web Notification API + audio chime
+      WebNotificationHelper.showNotification(
+        title: title,
+        body: body,
+        tag: 'call_$callId',
+        onClick: () {
+          onNotificationTapped?.call('$addressId/$callId');
+        },
+      );
+      return;
+    }
 
     final NotificationDetails notificationDetails = NotificationDetails(
       android: AndroidNotificationDetails(
@@ -168,8 +220,10 @@ class NotificationService {
   /// Cancel an active notification when call answered or declined
   Future<void> cancelCallNotification(String callId) async {
     try {
-      final int notifId = callId.hashCode & 0x7FFFFFFF;
-      await _notificationsPlugin.cancel(id: notifId);
+      if (!kIsWeb) {
+        final int notifId = callId.hashCode & 0x7FFFFFFF;
+        await _notificationsPlugin.cancel(id: notifId);
+      }
     } catch (e) {
       debugPrint('[Notification] Failed to cancel notification: $e');
     }

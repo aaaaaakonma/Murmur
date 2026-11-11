@@ -33,6 +33,8 @@ class _HomeScreenState extends State<HomeScreen> {
   String _selectedFilter = 'all'; // 'all', 'ephemeral', 'persistent'
   String? _selectedAddressId;
   String _activeWorkspaceTab = 'keys'; // 'keys' or 'chat'
+  String _mobileKeyView = 'ledger'; // 'ledger' or 'inspector' on mobile
+  bool _isNotificationBannerDismissed = false;
 
   void _showPacketInspector() {
     showModalBottomSheet(
@@ -52,6 +54,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     widget.chatService.addListener(_onServiceUpdate);
+    NotificationService().permissionState.addListener(_onPermissionStateChanged);
     NotificationService().initialize(onTap: (payload) {
       if (mounted) {
         setState(() => _activeWorkspaceTab = 'chat');
@@ -59,9 +62,14 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
+  void _onPermissionStateChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
     widget.chatService.removeListener(_onServiceUpdate);
+    NotificationService().permissionState.removeListener(_onPermissionStateChanged);
     _passphraseController.dispose();
     _searchController.dispose();
     _peerUriController.dispose();
@@ -1082,13 +1090,44 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ],
           )
-        : SingleChildScrollView(
-            child: Column(
-              children: [
-                _buildLedgerView(filteredAddresses),
-                _buildInspectorView(selectedAddr),
-              ],
-            ),
+        : Column(
+            children: [
+              // Mobile switcher between Key Ledger and QR Inspector
+              Container(
+                color: const Color(0xFF0C0C0E),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: _buildMobileSegmentButton(
+                        'Ingress Keys (${filteredAddresses.length})',
+                        Icons.key_outlined,
+                        _mobileKeyView == 'ledger',
+                        () => setState(() => _mobileKeyView = 'ledger'),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _buildMobileSegmentButton(
+                        'QR & Inspector',
+                        Icons.qr_code_2_rounded,
+                        _mobileKeyView == 'inspector',
+                        () => setState(() => _mobileKeyView = 'inspector'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(color: Color(0xFF27272A), height: 1),
+              Expanded(
+                child: _mobileKeyView == 'ledger'
+                    ? _buildLedgerView(filteredAddresses)
+                    : Container(
+                        color: const Color(0xFF0C0C0F),
+                        child: _buildInspectorView(selectedAddr),
+                      ),
+              ),
+            ],
           );
 
     return Scaffold(
@@ -1098,6 +1137,9 @@ class _HomeScreenState extends State<HomeScreen> {
         children: [
           // Sub-Header Navigation Tab Strip (Persistent across tabs)
           _buildWorkspaceNavigationBar(),
+
+          // Notification Permission Prompt Banner
+          _buildNotificationPermissionBanner(),
 
           // Active Workspace Content
           Expanded(
@@ -1214,7 +1256,72 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
       actions: [
-        if (_activeWorkspaceTab == 'chat') ...[
+        // Notification Permission Action (Web & Mobile Prompt)
+        ValueListenableBuilder<String>(
+          valueListenable: NotificationService().permissionState,
+          builder: (_, perm, __) {
+            final isGranted = perm == 'granted';
+            if (!isWide) {
+              return IconButton(
+                icon: Icon(
+                  isGranted ? Icons.notifications_active : Icons.notifications_none,
+                  size: 16,
+                  color: isGranted ? const Color(0xFF10B981) : const Color(0xFFA1A1AA),
+                ),
+                tooltip: isGranted ? 'Notifications Active' : 'Allow Notifications',
+                onPressed: () async {
+                  final granted = await NotificationService().requestPermissions();
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(granted ? 'Inbound call alerts active!' : 'Notifications not granted.'),
+                        backgroundColor: granted ? const Color(0xFF10B981) : const Color(0xFFEF4444),
+                      ),
+                    );
+                  }
+                },
+              );
+            }
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: OutlinedButton.icon(
+                icon: Icon(
+                  isGranted ? Icons.notifications_active : Icons.notifications_none,
+                  size: 13,
+                  color: isGranted ? const Color(0xFF10B981) : const Color(0xFFA1A1AA),
+                ),
+                label: Text(
+                  isGranted ? 'Alerts Active' : 'Allow Alerts',
+                  style: TextStyle(
+                    color: isGranted ? const Color(0xFF10B981) : const Color(0xFFA1A1AA),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                style: OutlinedButton.styleFrom(
+                  backgroundColor: const Color(0xFF141416),
+                  side: BorderSide(color: isGranted ? const Color(0xFF1B4D33) : const Color(0xFF27272A)),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(2)),
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                ),
+                onPressed: () async {
+                  final granted = await NotificationService().requestPermissions();
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(granted ? 'Inbound call alerts active!' : 'Notifications not granted.'),
+                        backgroundColor: granted ? const Color(0xFF10B981) : const Color(0xFFEF4444),
+                      ),
+                    );
+                  }
+                },
+              ),
+            );
+          },
+        ),
+        const SizedBox(width: 6),
+
+        if (isWide && _activeWorkspaceTab == 'chat') ...[
           // Export Audit Log
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8),
@@ -1292,8 +1399,8 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
           ],
-        ] else ...[
-          // Quick Burn / Zeroize All on Keys tab
+        ] else if (isWide) ...[
+          // Quick Burn / Zeroize All on Keys tab (desktop)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8),
             child: TextButton.icon(
@@ -1318,9 +1425,23 @@ class _HomeScreenState extends State<HomeScreen> {
               },
             ),
           ),
+        ] else ...[
+          // Mobile Quick Burn Icon
+          IconButton(
+            icon: const Icon(Icons.local_fire_department, size: 16, color: Color(0xFFF87171)),
+            tooltip: 'Quick Burn / Zeroize All',
+            onPressed: () async {
+              await widget.chatService.leaveRoom();
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('All ephemeral buffers zeroized.')),
+                );
+              }
+            },
+          ),
         ],
 
-        const SizedBox(width: 12),
+        const SizedBox(width: 8),
         // Node Badge
         Container(
           margin: const EdgeInsets.symmetric(vertical: 10),
@@ -1338,7 +1459,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ],
           ),
         ),
-        const SizedBox(width: 16),
+        const SizedBox(width: 14),
       ],
     );
   }
@@ -1350,11 +1471,13 @@ class _HomeScreenState extends State<HomeScreen> {
     final isInRoom = widget.chatService.roomId != null;
     final isSecure = widget.chatService.status == SessionStatus.presenceActivated;
     final hasIncoming = widget.chatService.incomingCall != null;
-    final isDesktop = MediaQuery.of(context).size.width >= 860;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isDesktop = screenWidth >= 860;
+    final isMobile = screenWidth < 680;
 
     return Container(
       height: 48,
-      padding: const EdgeInsets.symmetric(horizontal: 16),
+      padding: EdgeInsets.symmetric(horizontal: isMobile ? 8 : 16),
       decoration: const BoxDecoration(
         color: Color(0xFF0C0C0E),
         border: Border(
@@ -1365,136 +1488,143 @@ class _HomeScreenState extends State<HomeScreen> {
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           // Segmented Primary Tabs
-          Container(
-            padding: const EdgeInsets.all(3),
-            decoration: BoxDecoration(
-              color: const Color(0xFF131317),
-              borderRadius: BorderRadius.circular(4),
-              border: Border.all(color: const Color(0xFF27272A)),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _buildSubNavButton(
-                  id: 'keys',
-                  label: isDesktop ? 'Ingress Keys & Addresses' : 'Ingress Keys',
-                  icon: Icons.key_outlined,
-                  badgeText: '${widget.chatService.addresses.length}',
-                  isSelected: _activeWorkspaceTab == 'keys',
-                  badgeColor: const Color(0xFF10B981),
+          Expanded(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Container(
+                padding: const EdgeInsets.all(3),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF131317),
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: const Color(0xFF27272A)),
                 ),
-                const SizedBox(width: 4),
-                _buildSubNavButton(
-                  id: 'contacts',
-                  label: isDesktop ? 'Saved Peers & Directory' : 'Saved Peers',
-                  icon: Icons.people_outline,
-                  badgeText: '${widget.chatService.contacts.length}',
-                  isSelected: _activeWorkspaceTab == 'contacts',
-                  badgeColor: const Color(0xFF60A5FA),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _buildSubNavButton(
+                      id: 'keys',
+                      label: isDesktop ? 'Ingress Keys & Addresses' : (isMobile ? 'Keys' : 'Ingress Keys'),
+                      icon: Icons.key_outlined,
+                      badgeText: '${widget.chatService.addresses.length}',
+                      isSelected: _activeWorkspaceTab == 'keys',
+                      badgeColor: const Color(0xFF10B981),
+                    ),
+                    const SizedBox(width: 4),
+                    _buildSubNavButton(
+                      id: 'contacts',
+                      label: isDesktop ? 'Saved Peers & Directory' : (isMobile ? 'Peers' : 'Saved Peers'),
+                      icon: Icons.people_outline,
+                      badgeText: '${widget.chatService.contacts.length}',
+                      isSelected: _activeWorkspaceTab == 'contacts',
+                      badgeColor: const Color(0xFF60A5FA),
+                    ),
+                    const SizedBox(width: 4),
+                    _buildSubNavButton(
+                      id: 'chat',
+                      label: isDesktop ? 'Direct Mesh Chat' : (isMobile ? 'Chat' : 'Mesh Chat'),
+                      icon: Icons.forum_outlined,
+                      badgeText: hasIncoming
+                          ? 'CALL'
+                          : (isInRoom ? (isSecure ? 'P2P' : '3DH') : 'IDLE'),
+                      isSelected: _activeWorkspaceTab == 'chat',
+                      hasDot: true,
+                      dotColor: hasIncoming
+                          ? const Color(0xFFFBBF24)
+                          : (isInRoom
+                              ? (isSecure ? const Color(0xFF10B981) : const Color(0xFFF59E0B))
+                              : const Color(0xFF71717A)),
+                      badgeColor: hasIncoming
+                          ? const Color(0xFFFBBF24)
+                          : (isInRoom
+                              ? (isSecure ? const Color(0xFF10B981) : const Color(0xFFF59E0B))
+                              : const Color(0xFFA1A1AA)),
+                    ),
+                  ],
                 ),
-                const SizedBox(width: 4),
-                _buildSubNavButton(
-                  id: 'chat',
-                  label: isDesktop ? 'Direct Mesh Chat' : 'Mesh Chat',
-                  icon: Icons.forum_outlined,
-                  badgeText: hasIncoming
-                      ? '1 CALL'
-                      : (isInRoom ? (isSecure ? 'P2P ONLINE' : 'SYNCING') : 'STANDBY'),
-                  isSelected: _activeWorkspaceTab == 'chat',
-                  hasDot: true,
-                  dotColor: hasIncoming
-                      ? const Color(0xFFFBBF24)
-                      : (isInRoom
-                          ? (isSecure ? const Color(0xFF10B981) : const Color(0xFFF59E0B))
-                          : const Color(0xFF71717A)),
-                  badgeColor: hasIncoming
-                      ? const Color(0xFFFBBF24)
-                      : (isInRoom
-                          ? (isSecure ? const Color(0xFF10B981) : const Color(0xFFF59E0B))
-                          : const Color(0xFFA1A1AA)),
-                ),
-              ],
+              ),
             ),
           ),
 
-          // Contextual Right Actions / Quick Switch
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (hasIncoming) ...[
-                // Incoming Call Alert Banner Button
-                FilledButton.icon(
-                  icon: const Icon(Icons.call_rounded, size: 14, color: Color(0xFF09090B)),
-                  label: Text(
-                    isDesktop ? 'Incoming P2P Connection — Open Chat' : 'Incoming Call',
-                    style: const TextStyle(color: Color(0xFF09090B), fontSize: 11, fontWeight: FontWeight.bold),
+          // Contextual Right Actions (Desktop / Tablet)
+          if (!isMobile) ...[
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (hasIncoming) ...[
+                  // Incoming Call Alert Banner Button
+                  FilledButton.icon(
+                    icon: const Icon(Icons.call_rounded, size: 14, color: Color(0xFF09090B)),
+                    label: Text(
+                      isDesktop ? 'Incoming P2P Connection — Open Chat' : 'Incoming Call',
+                      style: const TextStyle(color: Color(0xFF09090B), fontSize: 11, fontWeight: FontWeight.bold),
+                    ),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFFFBBF24),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(3)),
+                    ),
+                    onPressed: () {
+                      setState(() => _activeWorkspaceTab = 'chat');
+                    },
                   ),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: const Color(0xFFFBBF24),
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(3)),
+                ] else if (_activeWorkspaceTab == 'contacts') ...[
+                  // Add Peer Mailbox Contact
+                  FilledButton.icon(
+                    icon: const Icon(Icons.person_add_alt_1, size: 14, color: Color(0xFF09090B)),
+                    label: const Text(
+                      'Add Peer Contact',
+                      style: TextStyle(color: Color(0xFF09090B), fontSize: 11, fontWeight: FontWeight.bold),
+                    ),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(3)),
+                    ),
+                    onPressed: _handleAddContactModal,
                   ),
-                  onPressed: () {
-                    setState(() => _activeWorkspaceTab = 'chat');
-                  },
-                ),
-              ] else if (_activeWorkspaceTab == 'contacts') ...[
-                // Add Peer Mailbox Contact
-                FilledButton.icon(
-                  icon: const Icon(Icons.person_add_alt_1, size: 14, color: Color(0xFF09090B)),
-                  label: const Text(
-                    'Add Peer Contact',
-                    style: TextStyle(color: Color(0xFF09090B), fontSize: 11, fontWeight: FontWeight.bold),
+                ] else if (_activeWorkspaceTab == 'keys') ...[
+                  // Direct shortcut to chat
+                  FilledButton.icon(
+                    icon: const Icon(Icons.forum_outlined, size: 14, color: Colors.white),
+                    label: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          isDesktop ? 'Switch to Direct Mesh Chat' : 'Open Chat',
+                          style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600),
+                        ),
+                        const SizedBox(width: 6),
+                        const Icon(Icons.arrow_forward, size: 12, color: Color(0xFF10B981)),
+                      ],
+                    ),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFF18181D),
+                      side: const BorderSide(color: Color(0xFF3F3F46)),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(3)),
+                    ),
+                    onPressed: () => setState(() => _activeWorkspaceTab = 'chat'),
                   ),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(3)),
+                ] else ...[
+                  // Direct shortcut to keys
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.vpn_key_outlined, size: 13, color: Color(0xFFA1A1AA)),
+                    label: Text(
+                      isDesktop ? 'Manage Ingress Keys & Addresses' : 'Ingress Keys',
+                      style: const TextStyle(color: Color(0xFFA1A1AA), fontSize: 11, fontWeight: FontWeight.w500),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      backgroundColor: const Color(0xFF121216),
+                      side: const BorderSide(color: Color(0xFF27272A)),
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(3)),
+                    ),
+                    onPressed: () => setState(() => _activeWorkspaceTab = 'keys'),
                   ),
-                  onPressed: _handleAddContactModal,
-                ),
-              ] else if (_activeWorkspaceTab == 'keys') ...[
-                // Direct shortcut to chat
-                FilledButton.icon(
-                  icon: const Icon(Icons.forum_outlined, size: 14, color: Colors.white),
-                  label: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        isDesktop ? 'Switch to Direct Mesh Chat' : 'Open Chat',
-                        style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600),
-                      ),
-                      const SizedBox(width: 6),
-                      const Icon(Icons.arrow_forward, size: 12, color: Color(0xFF10B981)),
-                    ],
-                  ),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: const Color(0xFF18181D),
-                    side: const BorderSide(color: Color(0xFF3F3F46)),
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(3)),
-                  ),
-                  onPressed: () => setState(() => _activeWorkspaceTab = 'chat'),
-                ),
-              ] else ...[
-                // Direct shortcut to keys
-                OutlinedButton.icon(
-                  icon: const Icon(Icons.vpn_key_outlined, size: 13, color: Color(0xFFA1A1AA)),
-                  label: Text(
-                    isDesktop ? 'Manage Ingress Keys & Addresses' : 'Ingress Keys',
-                    style: const TextStyle(color: Color(0xFFA1A1AA), fontSize: 11, fontWeight: FontWeight.w500),
-                  ),
-                  style: OutlinedButton.styleFrom(
-                    backgroundColor: const Color(0xFF121216),
-                    side: const BorderSide(color: Color(0xFF27272A)),
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(3)),
-                  ),
-                  onPressed: () => setState(() => _activeWorkspaceTab = 'keys'),
-                ),
+                ],
               ],
-            ],
-          ),
+            ),
+          ],
         ],
       ),
     );
@@ -1510,12 +1640,13 @@ class _HomeScreenState extends State<HomeScreen> {
     Color dotColor = const Color(0xFF10B981),
     Color badgeColor = const Color(0xFFA1A1AA),
   }) {
+    final isMobile = MediaQuery.of(context).size.width < 680;
     return InkWell(
       onTap: () => setState(() => _activeWorkspaceTab = id),
       borderRadius: BorderRadius.circular(3),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        padding: EdgeInsets.symmetric(horizontal: isMobile ? 8 : 14, vertical: 7),
         decoration: BoxDecoration(
           color: isSelected ? const Color(0xFF222228) : Colors.transparent,
           borderRadius: BorderRadius.circular(3),
@@ -1815,68 +1946,100 @@ class _HomeScreenState extends State<HomeScreen> {
   // LEFT PANE: KEY LEDGER & CONNECT BAR
   // -------------------------------------------------------------
   Widget _buildLedgerView(List<UserAddress> addresses) {
+    final isDesktop = MediaQuery.of(context).size.width >= 860;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         // Header & Actions Bar
         Padding(
-          padding: const EdgeInsets.all(20),
+          padding: EdgeInsets.all(isDesktop ? 20 : 14),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Row(
-                    children: [
-                      const Icon(Icons.key, size: 18, color: Color(0xFFA1A1AA)),
-                      const SizedBox(width: 8),
-                      const Text(
-                        'Ingress Keys & Addresses',
-                        style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600, letterSpacing: -0.2),
-                      ),
-                    ],
-                  ),
-                  Row(
-                    children: [
-                      OutlinedButton.icon(
-                        icon: const Icon(Icons.forum_outlined, size: 14, color: Color(0xFF34D399)),
-                        label: const Text('Open Direct Mesh Chat',
-                            style: TextStyle(color: Color(0xFF34D399), fontSize: 12, fontWeight: FontWeight.w600)),
-                        style: OutlinedButton.styleFrom(
-                          backgroundColor: const Color(0xFF0F1E16),
-                          side: const BorderSide(color: Color(0xFF1B4D33)),
-                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(3)),
+              if (isDesktop) ...[
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(Icons.key, size: 18, color: Color(0xFFA1A1AA)),
+                        SizedBox(width: 8),
+                        Text(
+                          'Ingress Keys & Addresses',
+                          style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600, letterSpacing: -0.2),
                         ),
-                        onPressed: () => setState(() => _activeWorkspaceTab = 'chat'),
-                      ),
-                      const SizedBox(width: 8),
-                      FilledButton.icon(
-                        icon: const Icon(Icons.add, size: 15, color: Color(0xFF09090B)),
-                        label: const Text('Create Ingress Key',
-                            style: TextStyle(color: Color(0xFF09090B), fontSize: 12, fontWeight: FontWeight.w500)),
-                        style: FilledButton.styleFrom(
-                          backgroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(3)),
+                      ],
+                    ),
+                    Row(
+                      children: [
+                        OutlinedButton.icon(
+                          icon: const Icon(Icons.forum_outlined, size: 14, color: Color(0xFF34D399)),
+                          label: const Text('Open Direct Mesh Chat',
+                              style: TextStyle(color: Color(0xFF34D399), fontSize: 12, fontWeight: FontWeight.w600)),
+                          style: OutlinedButton.styleFrom(
+                            backgroundColor: const Color(0xFF0F1E16),
+                            side: const BorderSide(color: Color(0xFF1B4D33)),
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(3)),
+                          ),
+                          onPressed: () => setState(() => _activeWorkspaceTab = 'chat'),
                         ),
-                        onPressed: _handleCreateKeyModal,
+                        const SizedBox(width: 8),
+                        FilledButton.icon(
+                          icon: const Icon(Icons.add, size: 15, color: Color(0xFF09090B)),
+                          label: const Text('Create Ingress Key',
+                              style: TextStyle(color: Color(0xFF09090B), fontSize: 12, fontWeight: FontWeight.w500)),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(3)),
+                          ),
+                          onPressed: _handleCreateKeyModal,
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ] else ...[
+                // Mobile Header Row
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(Icons.key, size: 16, color: Color(0xFFA1A1AA)),
+                        SizedBox(width: 8),
+                        Text(
+                          'Ingress Keys',
+                          style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w600),
+                        ),
+                      ],
+                    ),
+                    FilledButton.icon(
+                      icon: const Icon(Icons.add, size: 14, color: Color(0xFF09090B)),
+                      label: const Text('New Key',
+                          style: TextStyle(color: Color(0xFF09090B), fontSize: 11, fontWeight: FontWeight.w600)),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(3)),
                       ),
-                    ],
-                  ),
-                ],
-              ),
+                      onPressed: _handleCreateKeyModal,
+                    ),
+                  ],
+                ),
+              ],
               const SizedBox(height: 6),
               const Text(
                 'Manage ephemeral and persistent ingress endpoints. External peers use these cryptographic addresses to initiate encrypted direct sessions.',
-                style: TextStyle(color: Color(0xFF71717A), fontSize: 12, height: 1.4),
+                style: TextStyle(color: Color(0xFF71717A), fontSize: 11, height: 1.4),
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 12),
 
               // Peer Dialing Bar (Connect to Ingress)
               Container(
-                padding: const EdgeInsets.all(12),
+                padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
                   color: const Color(0xFF121215),
                   borderRadius: BorderRadius.circular(3),
@@ -1884,15 +2047,17 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 child: Row(
                   children: [
-                    const Icon(Icons.call_made_rounded, size: 16, color: Color(0xFF10B981)),
-                    const SizedBox(width: 10),
+                    const Icon(Icons.call_made_rounded, size: 15, color: Color(0xFF10B981)),
+                    const SizedBox(width: 8),
                     Expanded(
                       child: TextField(
                         controller: _peerUriController,
                         style: const TextStyle(color: Colors.white, fontSize: 12, fontFamily: 'JetBrains Mono'),
-                        decoration: const InputDecoration(
-                          hintText: 'Enter peer address (e.g. bored_8f3a-9e1c... or mm://ing/...)',
-                          hintStyle: TextStyle(color: Color(0xFF52525B), fontSize: 12),
+                        decoration: InputDecoration(
+                          hintText: isDesktop
+                              ? 'Enter peer address (e.g. bored_8f3a-9e1c... or mm://ing/...)'
+                              : 'Enter peer address or URI...',
+                          hintStyle: const TextStyle(color: Color(0xFF52525B), fontSize: 11),
                           border: InputBorder.none,
                           isDense: true,
                         ),
@@ -1900,219 +2065,282 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                     ),
                     FilledButton.icon(
-                      icon: const Icon(Icons.call_made_rounded, size: 13, color: Color(0xFF09090B)),
+                      icon: const Icon(Icons.call_made_rounded, size: 12, color: Color(0xFF09090B)),
                       label: _isLoading
                           ? const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF09090B)))
-                          : const Text('Connect & Open Chat', style: TextStyle(color: Color(0xFF09090B), fontSize: 11, fontWeight: FontWeight.bold)),
+                          : Text(isDesktop ? 'Connect & Open Chat' : 'Call',
+                              style: const TextStyle(color: Color(0xFF09090B), fontSize: 11, fontWeight: FontWeight.bold)),
                       style: FilledButton.styleFrom(
                         backgroundColor: const Color(0xFF10B981),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(2)),
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                        padding: EdgeInsets.symmetric(horizontal: isDesktop ? 14 : 10, vertical: 8),
                       ),
                       onPressed: _isLoading ? null : _handleConnectPeerUri,
                     ),
                   ],
                 ),
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 12),
 
               // Filter Tabs & Search
-              Row(
-                children: [
-                  Container(
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF121215),
-                      borderRadius: BorderRadius.circular(3),
-                      border: Border.all(color: const Color(0xFF27272A)),
+              if (isDesktop) ...[
+                Row(
+                  children: [
+                    Container(
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF121215),
+                        borderRadius: BorderRadius.circular(3),
+                        border: Border.all(color: const Color(0xFF27272A)),
+                      ),
+                      padding: const EdgeInsets.all(2),
+                      child: Row(
+                        children: [
+                          _buildFilterTab('all', 'All', widget.chatService.addresses.length),
+                          _buildFilterTab('ephemeral', 'Single-Use', widget.chatService.addresses.where((a) => a.isOneTime).length),
+                          _buildFilterTab('persistent', 'Persistent', widget.chatService.addresses.where((a) => !a.isOneTime).length),
+                        ],
+                      ),
                     ),
-                    padding: const EdgeInsets.all(2),
-                    child: Row(
-                      children: [
-                        _buildFilterTab('all', 'All', widget.chatService.addresses.length),
-                        _buildFilterTab('ephemeral', 'Single-Use', widget.chatService.addresses.where((a) => a.isOneTime).length),
-                        _buildFilterTab('persistent', 'Persistent', widget.chatService.addresses.where((a) => !a.isOneTime).length),
-                      ],
-                    ),
-                  ),
-                  const Spacer(),
-                  SizedBox(
-                    width: 200,
-                    height: 32,
-                    child: TextField(
-                      controller: _searchController,
-                      onChanged: (_) => setState(() {}),
-                      style: const TextStyle(color: Colors.white, fontSize: 11),
-                      decoration: InputDecoration(
-                        filled: true,
-                        fillColor: const Color(0xFF121215),
-                        prefixIcon: const Icon(Icons.search, size: 14, color: Color(0xFF71717A)),
-                        hintText: 'Search key or URI...',
-                        hintStyle: const TextStyle(color: Color(0xFF52525B), fontSize: 11),
-                        contentPadding: EdgeInsets.zero,
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(3),
-                          borderSide: const BorderSide(color: Color(0xFF27272A)),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(3),
-                          borderSide: const BorderSide(color: Color(0xFF52525B)),
+                    const Spacer(),
+                    SizedBox(
+                      width: 200,
+                      height: 32,
+                      child: TextField(
+                        controller: _searchController,
+                        onChanged: (_) => setState(() {}),
+                        style: const TextStyle(color: Colors.white, fontSize: 11),
+                        decoration: InputDecoration(
+                          filled: true,
+                          fillColor: const Color(0xFF121215),
+                          prefixIcon: const Icon(Icons.search, size: 14, color: Color(0xFF71717A)),
+                          hintText: 'Search key or URI...',
+                          hintStyle: const TextStyle(color: Color(0xFF52525B), fontSize: 11),
+                          contentPadding: EdgeInsets.zero,
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(3),
+                            borderSide: const BorderSide(color: Color(0xFF27272A)),
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(3),
+                            borderSide: const BorderSide(color: Color(0xFF52525B)),
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                ],
-              ),
+                  ],
+                ),
+              ] else ...[
+                // Mobile stacked Filter & Search
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Container(
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF121215),
+                        borderRadius: BorderRadius.circular(3),
+                        border: Border.all(color: const Color(0xFF27272A)),
+                      ),
+                      padding: const EdgeInsets.all(2),
+                      child: Row(
+                        children: [
+                          Expanded(child: _buildFilterTab('all', 'All', widget.chatService.addresses.length)),
+                          Expanded(child: _buildFilterTab('ephemeral', 'Single-Use', widget.chatService.addresses.where((a) => a.isOneTime).length)),
+                          Expanded(child: _buildFilterTab('persistent', 'Persistent', widget.chatService.addresses.where((a) => !a.isOneTime).length)),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      height: 34,
+                      child: TextField(
+                        controller: _searchController,
+                        onChanged: (_) => setState(() {}),
+                        style: const TextStyle(color: Colors.white, fontSize: 11),
+                        decoration: InputDecoration(
+                          filled: true,
+                          fillColor: const Color(0xFF121215),
+                          prefixIcon: const Icon(Icons.search, size: 14, color: Color(0xFF71717A)),
+                          hintText: 'Search keys...',
+                          hintStyle: const TextStyle(color: Color(0xFF52525B), fontSize: 11),
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(3),
+                            borderSide: const BorderSide(color: Color(0xFF27272A)),
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(3),
+                            borderSide: const BorderSide(color: Color(0xFF52525B)),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ],
           ),
         ),
 
         const Divider(color: Color(0xFF27272A), height: 1),
 
-        // Table Header
-        Container(
-          height: 32,
-          color: const Color(0xFF0C0C0E),
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: const Row(
-            children: [
-              Expanded(flex: 3, child: Text('NAME & URI', style: TextStyle(color: Color(0xFF71717A), fontSize: 10, fontWeight: FontWeight.w600))),
-              Expanded(flex: 2, child: Text('TYPE & POLICY', style: TextStyle(color: Color(0xFF71717A), fontSize: 10, fontWeight: FontWeight.w600))),
-              Expanded(flex: 2, child: Text('STATUS / LIFECYCLE', style: TextStyle(color: Color(0xFF71717A), fontSize: 10, fontWeight: FontWeight.w600))),
-              Expanded(flex: 2, child: Text('ACTIONS', textAlign: TextAlign.right, style: TextStyle(color: Color(0xFF71717A), fontSize: 10, fontWeight: FontWeight.w600))),
-            ],
+        // Table Header (Desktop only)
+        if (isDesktop) ...[
+          Container(
+            height: 32,
+            color: const Color(0xFF0C0C0E),
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: const Row(
+              children: [
+                Expanded(flex: 3, child: Text('NAME & URI', style: TextStyle(color: Color(0xFF71717A), fontSize: 10, fontWeight: FontWeight.w600))),
+                Expanded(flex: 2, child: Text('TYPE & POLICY', style: TextStyle(color: Color(0xFF71717A), fontSize: 10, fontWeight: FontWeight.w600))),
+                Expanded(flex: 2, child: Text('STATUS / LIFECYCLE', style: TextStyle(color: Color(0xFF71717A), fontSize: 10, fontWeight: FontWeight.w600))),
+                Expanded(flex: 2, child: Text('ACTIONS', textAlign: TextAlign.right, style: TextStyle(color: Color(0xFF71717A), fontSize: 10, fontWeight: FontWeight.w600))),
+              ],
+            ),
           ),
-        ),
-        const Divider(color: Color(0xFF1C1C20), height: 1),
+          const Divider(color: Color(0xFF1C1C20), height: 1),
+        ],
 
-        // Table Rows
+        // Rows / Cards List
         Expanded(
           child: addresses.isEmpty
               ? const Center(
                   child: Text('No ingress keys match active filter.', style: TextStyle(color: Color(0xFF71717A), fontSize: 12)),
                 )
-              : ListView.separated(
-                  itemCount: addresses.length,
-                  separatorBuilder: (_, __) => const Divider(color: Color(0xFF1C1C20), height: 1),
-                  itemBuilder: (ctx, i) {
-                    final addr = addresses[i];
-                    final isSelected = addr.id == _selectedAddressId;
-                    return InkWell(
-                      onTap: () => setState(() => _selectedAddressId = addr.id),
-                      child: Container(
-                        color: isSelected ? const Color(0xFF15151A) : Colors.transparent,
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                        child: Row(
-                          children: [
-                            // Name & URI
-                            Expanded(
-                              flex: 3,
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Row(
+              : (isDesktop
+                  ? ListView.separated(
+                      itemCount: addresses.length,
+                      separatorBuilder: (_, __) => const Divider(color: Color(0xFF1C1C20), height: 1),
+                      itemBuilder: (ctx, i) {
+                        final addr = addresses[i];
+                        final isSelected = addr.id == _selectedAddressId;
+                        return InkWell(
+                          onTap: () => setState(() => _selectedAddressId = addr.id),
+                          child: Container(
+                            color: isSelected ? const Color(0xFF15151A) : Colors.transparent,
+                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                            child: Row(
+                              children: [
+                                // Name & URI
+                                Expanded(
+                                  flex: 3,
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
                                     children: [
-                                      Text(addr.label,
-                                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w500, fontSize: 12)),
-                                      const SizedBox(width: 6),
+                                      Row(
+                                        children: [
+                                          Text(addr.label,
+                                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w500, fontSize: 12)),
+                                          const SizedBox(width: 6),
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xFF1C1C22),
+                                              borderRadius: BorderRadius.circular(2),
+                                              border: Border.all(color: const Color(0xFF27272A)),
+                                            ),
+                                            child: Text(
+                                              addr.isOneTime ? 'SINGLE-USE' : 'PERSISTENT',
+                                              style: const TextStyle(color: Color(0xFFA1A1AA), fontSize: 9, fontWeight: FontWeight.w500),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 3),
+                                      Row(
+                                        children: [
+                                          Text('mm://ing/${addr.id.substring(0, min(14, addr.id.length))}...',
+                                              style: const TextStyle(color: Color(0xFFA1A1AA), fontSize: 11, fontFamily: 'JetBrains Mono')),
+                                          const SizedBox(width: 4),
+                                          InkWell(
+                                            onTap: () {
+                                              Clipboard.setData(ClipboardData(text: 'mm://ingress/${addr.id}'));
+                                              ScaffoldMessenger.of(context).showSnackBar(
+                                                SnackBar(content: Text('Copied ingress URI for "${addr.label}"')),
+                                              );
+                                            },
+                                            child: const Icon(Icons.copy, size: 12, color: Color(0xFF71717A)),
+                                          ),
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                // Type & Policy
+                                Expanded(
+                                  flex: 2,
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(addr.isOneTime ? 'Burn on 1st handshake' : 'Manual Authorization',
+                                          style: const TextStyle(color: Color(0xFFE4E4E7), fontSize: 11, fontWeight: FontWeight.w500)),
+                                      Text(addr.isOneTime ? 'Auto-destruct on ratchet' : 'Max 5 concurrent peers',
+                                          style: const TextStyle(color: Color(0xFF71717A), fontSize: 10)),
+                                    ],
+                                  ),
+                                ),
+                                // Status / Lifecycle
+                                Expanded(
+                                  flex: 2,
+                                  child: Row(
+                                    children: [
                                       Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                                        decoration: BoxDecoration(
-                                          color: const Color(0xFF1C1C22),
-                                          borderRadius: BorderRadius.circular(2),
-                                          border: Border.all(color: const Color(0xFF27272A)),
-                                        ),
-                                        child: Text(
-                                          addr.isOneTime ? 'SINGLE-USE' : 'PERSISTENT',
-                                          style: const TextStyle(color: Color(0xFFA1A1AA), fontSize: 9, fontWeight: FontWeight.w500),
-                                        ),
+                                        width: 6,
+                                        height: 6,
+                                        decoration: const BoxDecoration(shape: BoxShape.circle, color: Color(0xFF10B981)),
                                       ),
+                                      const SizedBox(width: 6),
+                                      const Text('Active • Ready',
+                                          style: TextStyle(color: Color(0xFF10B981), fontSize: 11, fontWeight: FontWeight.w500)),
                                     ],
                                   ),
-                                  const SizedBox(height: 3),
-                                  Row(
+                                ),
+                                // Actions
+                                Expanded(
+                                  flex: 2,
+                                  child: Row(
+                                    mainAxisAlignment: MainAxisAlignment.end,
                                     children: [
-                                      Text('mm://ing/${addr.id.substring(0, min(14, addr.id.length))}...',
-                                          style: const TextStyle(color: Color(0xFFA1A1AA), fontSize: 11, fontFamily: 'JetBrains Mono')),
-                                      const SizedBox(width: 4),
-                                      InkWell(
-                                        onTap: () {
-                                          Clipboard.setData(ClipboardData(text: 'mm://ingress/${addr.id}'));
-                                          ScaffoldMessenger.of(context).showSnackBar(
-                                            SnackBar(content: Text('Copied ingress URI for "${addr.label}"')),
-                                          );
-                                        },
-                                        child: const Icon(Icons.copy, size: 12, color: Color(0xFF71717A)),
+                                      OutlinedButton(
+                                        style: OutlinedButton.styleFrom(
+                                          backgroundColor: const Color(0xFF18181C),
+                                          side: const BorderSide(color: Color(0xFF27272A)),
+                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(2)),
+                                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                        ),
+                                        onPressed: () => setState(() => _selectedAddressId = addr.id),
+                                        child: const Text('Details', style: TextStyle(color: Color(0xFFD4D4D8), fontSize: 11)),
+                                      ),
+                                      const SizedBox(width: 6),
+                                      OutlinedButton(
+                                        style: OutlinedButton.styleFrom(
+                                          backgroundColor: const Color(0xFF1C1214),
+                                          side: const BorderSide(color: Color(0xFF3F1D24)),
+                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(2)),
+                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                                        ),
+                                        onPressed: () => widget.chatService.deleteAddress(addr.id),
+                                        child: const Text('Revoke', style: TextStyle(color: Color(0xFFF87171), fontSize: 11)),
                                       ),
                                     ],
                                   ),
-                                ],
-                              ),
+                                ),
+                              ],
                             ),
-                            // Type & Policy
-                            Expanded(
-                              flex: 2,
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(addr.isOneTime ? 'Burn on 1st handshake' : 'Manual Authorization',
-                                      style: const TextStyle(color: Color(0xFFE4E4E7), fontSize: 11, fontWeight: FontWeight.w500)),
-                                  Text(addr.isOneTime ? 'Auto-destruct on ratchet' : 'Max 5 concurrent peers',
-                                      style: const TextStyle(color: Color(0xFF71717A), fontSize: 10)),
-                                ],
-                              ),
-                            ),
-                            // Status / Lifecycle
-                            Expanded(
-                              flex: 2,
-                              child: Row(
-                                children: [
-                                  Container(
-                                    width: 6,
-                                    height: 6,
-                                    decoration: const BoxDecoration(shape: BoxShape.circle, color: Color(0xFF10B981)),
-                                  ),
-                                  const SizedBox(width: 6),
-                                  const Text('Active • Ready',
-                                      style: TextStyle(color: Color(0xFF10B981), fontSize: 11, fontWeight: FontWeight.w500)),
-                                ],
-                              ),
-                            ),
-                            // Actions
-                            Expanded(
-                              flex: 2,
-                              child: Row(
-                                mainAxisAlignment: MainAxisAlignment.end,
-                                children: [
-                                  OutlinedButton(
-                                    style: OutlinedButton.styleFrom(
-                                      backgroundColor: const Color(0xFF18181C),
-                                      side: const BorderSide(color: Color(0xFF27272A)),
-                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(2)),
-                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                                    ),
-                                    onPressed: () => setState(() => _selectedAddressId = addr.id),
-                                    child: const Text('Details', style: TextStyle(color: Color(0xFFD4D4D8), fontSize: 11)),
-                                  ),
-                                  const SizedBox(width: 6),
-                                  OutlinedButton(
-                                    style: OutlinedButton.styleFrom(
-                                      backgroundColor: const Color(0xFF1C1214),
-                                      side: const BorderSide(color: Color(0xFF3F1D24)),
-                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(2)),
-                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                                    ),
-                                    onPressed: () => widget.chatService.deleteAddress(addr.id),
-                                    child: const Text('Revoke', style: TextStyle(color: Color(0xFFF87171), fontSize: 11)),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
-                ),
+                          ),
+                        );
+                      },
+                    )
+                  : ListView.separated(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                      itemCount: addresses.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 10),
+                      itemBuilder: (ctx, i) {
+                        final addr = addresses[i];
+                        final isSelected = addr.id == _selectedAddressId;
+                        return _buildMobileAddressCard(addr, isSelected);
+                      },
+                    )),
         ),
 
         // Bottom status rail
@@ -2483,6 +2711,244 @@ class _HomeScreenState extends State<HomeScreen> {
         children: [
           Text(label, style: const TextStyle(color: Color(0xFF71717A), fontSize: 11)),
           Text(value, style: const TextStyle(color: Colors.white, fontSize: 11, fontFamily: 'JetBrains Mono', fontWeight: FontWeight.w500)),
+        ],
+      ),
+    );
+  }
+
+  // =============================================================
+  // NOTIFICATION PERMISSION PROMPT BANNER
+  // =============================================================
+  Widget _buildNotificationPermissionBanner() {
+    return ValueListenableBuilder<String>(
+      valueListenable: NotificationService().permissionState,
+      builder: (_, perm, __) {
+        if (perm == 'granted' || perm == 'unsupported' || _isNotificationBannerDismissed) {
+          return const SizedBox.shrink();
+        }
+        return Container(
+          margin: const EdgeInsets.fromLTRB(16, 10, 16, 6),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: const Color(0xFF0F172A),
+            borderRadius: BorderRadius.circular(4),
+            border: Border.all(color: const Color(0xFF1E3A8A)),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 30,
+                height: 30,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1E293B),
+                  borderRadius: BorderRadius.circular(3),
+                ),
+                child: const Icon(Icons.notifications_active_outlined, size: 16, color: Color(0xFF60A5FA)),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'INBOUND CALL NOTIFICATIONS',
+                      style: TextStyle(
+                        fontFamily: 'JetBrains Mono',
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF93C5FD),
+                        letterSpacing: 0.8,
+                      ),
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      'Allow notifications to receive encrypted incoming call prompts when this tab or app is minimized.',
+                      style: TextStyle(color: Color(0xFF94A3B8), fontSize: 11),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFF2563EB),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(3)),
+                ),
+                onPressed: () async {
+                  final granted = await NotificationService().requestPermissions();
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(granted
+                            ? 'Inbound call alerts enabled!'
+                            : 'Notification permission was not granted.'),
+                        backgroundColor: granted ? const Color(0xFF10B981) : const Color(0xFFEF4444),
+                      ),
+                    );
+                  }
+                },
+                child: const Text('Allow Notifications', style: TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600)),
+              ),
+              const SizedBox(width: 6),
+              IconButton(
+                icon: const Icon(Icons.close, size: 14, color: Color(0xFF64748B)),
+                splashRadius: 16,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                onPressed: () => setState(() => _isNotificationBannerDismissed = true),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  // =============================================================
+  // MOBILE INGRESS KEY CARD & SEGMENT SWITCHER
+  // =============================================================
+  Widget _buildMobileSegmentButton(String label, IconData icon, bool isSelected, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(3),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        decoration: BoxDecoration(
+          color: isSelected ? const Color(0xFF1F1F24) : Colors.transparent,
+          borderRadius: BorderRadius.circular(3),
+          border: Border.all(
+            color: isSelected ? const Color(0xFF3F3F46) : const Color(0xFF27272A),
+          ),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 14, color: isSelected ? const Color(0xFF10B981) : const Color(0xFFA1A1AA)),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: TextStyle(
+                color: isSelected ? Colors.white : const Color(0xFFA1A1AA),
+                fontSize: 11,
+                fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMobileAddressCard(UserAddress addr, bool isSelected) {
+    return Container(
+      decoration: BoxDecoration(
+        color: isSelected ? const Color(0xFF15151C) : const Color(0xFF101014),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(
+          color: isSelected ? const Color(0xFF10B981) : const Color(0xFF27272A),
+        ),
+      ),
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 6,
+                    height: 6,
+                    decoration: const BoxDecoration(shape: BoxShape.circle, color: Color(0xFF10B981)),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    addr.label,
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13),
+                  ),
+                ],
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1C1C22),
+                  borderRadius: BorderRadius.circular(2),
+                  border: Border.all(color: const Color(0xFF27272A)),
+                ),
+                child: Text(
+                  addr.isOneTime ? 'SINGLE-USE' : 'PERSISTENT',
+                  style: const TextStyle(color: Color(0xFFA1A1AA), fontSize: 9, fontWeight: FontWeight.w600),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: const Color(0xFF0A0A0C),
+              borderRadius: BorderRadius.circular(2),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'mm://ing/${addr.id}',
+                    style: const TextStyle(color: Color(0xFFA1A1AA), fontSize: 11, fontFamily: 'JetBrains Mono'),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.copy, size: 13, color: Color(0xFF71717A)),
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: 'mm://ingress/${addr.id}'));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Copied ingress URI for "${addr.label}"')),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  icon: const Icon(Icons.qr_code_2_rounded, size: 13, color: Color(0xFF10B981)),
+                  label: const Text('QR & Inspect', style: TextStyle(color: Color(0xFF10B981), fontSize: 11)),
+                  style: OutlinedButton.styleFrom(
+                    backgroundColor: const Color(0xFF0F1B15),
+                    side: const BorderSide(color: Color(0xFF1D4D32)),
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(2)),
+                  ),
+                  onPressed: () {
+                    setState(() {
+                      _selectedAddressId = addr.id;
+                      _mobileKeyView = 'inspector';
+                    });
+                  },
+                ),
+              ),
+              const SizedBox(width: 8),
+              OutlinedButton.icon(
+                icon: const Icon(Icons.delete_outline, size: 13, color: Color(0xFFF87171)),
+                label: const Text('Burn', style: TextStyle(color: Color(0xFFF87171), fontSize: 11)),
+                style: OutlinedButton.styleFrom(
+                  backgroundColor: const Color(0xFF1C1214),
+                  side: const BorderSide(color: Color(0xFF3F1D24)),
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(2)),
+                ),
+                onPressed: () => widget.chatService.deleteAddress(addr.id),
+              ),
+            ],
+          ),
         ],
       ),
     );

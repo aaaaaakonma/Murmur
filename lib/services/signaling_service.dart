@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'user_address.dart';
+import 'firestore_security.dart';
 
 typedef DataChannelCallback = void Function(RTCDataChannel channel);
 typedef ConnectionStateCallback = void Function(RTCPeerConnectionState state);
@@ -28,10 +29,19 @@ class IncomingCallRequest {
 /// Facilitates SDP offer/answer exchange and ICE candidate trickle with buffering.
 /// Supports both Rendezvous Addresses (aliases) and direct room codes.
 class SignalingService {
-  final FirebaseFirestore _firestore;
+  final FirebaseFirestore? _customFirestore;
 
   SignalingService({FirebaseFirestore? firestore})
-      : _firestore = firestore ?? FirebaseFirestore.instance;
+      : _customFirestore = firestore;
+
+  FirebaseFirestore? get _firestore {
+    if (_customFirestore != null) return _customFirestore;
+    try {
+      return FirebaseFirestore.instance;
+    } catch (_) {
+      return null;
+    }
+  }
 
   RTCPeerConnection? _peerConnection;
   RTCDataChannel? _dataChannel;
@@ -61,12 +71,22 @@ class SignalingService {
   /// Initiator (Caller): Dial a peer's disposable address
   Future<String> callAddress(String targetAddress) async {
     final cleanAddress = UserAddress.normalizeId(targetAddress);
+    FirestorePayloadValidator.validateId(cleanAddress, name: 'Target address');
+    FirestoreRateLimiter().enforce('call_address');
     debugPrint('[Signaling] Calling address: $cleanAddress');
 
-    // Register active address doc if not already present
-    final addressRef = _firestore.collection('addresses').doc(cleanAddress);
+    // Anti-Bot Proof of Work challenge computation
+    final pow = await AntiBotProofOfWork.solve(challengeId: cleanAddress);
+
+    final firestore = _firestore;
+    if (firestore == null) throw StateError('Firestore is not initialized');
+
+    // Register active address doc if not already present with PoW proof
+    final addressRef = firestore.collection('addresses').doc(cleanAddress);
     await addressRef.set({
       'lastActive': FieldValue.serverTimestamp(),
+      'powNonce': pow.nonce,
+      'powTimestamp': pow.timestamp,
     }, SetOptions(merge: true));
 
     final callRef = addressRef.collection('calls').doc();
@@ -82,20 +102,27 @@ class SignalingService {
     _setupDataChannelListeners(_dataChannel!);
     onDataChannelReady?.call(_dataChannel!);
 
-    // Collect ICE candidates and write to callerCandidates
+    // Collect ICE candidates and write to callerCandidates with rate limiting & validation
     _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
       if (candidate.candidate != null && candidate.candidate!.isNotEmpty) {
-        callRef.collection('callerCandidates').add({
-          'candidate': candidate.candidate,
-          'sdpMid': candidate.sdpMid,
-          'sdpMLineIndex': candidate.sdpMLineIndex,
-        });
+        try {
+          FirestoreRateLimiter().enforce('trickle_candidate');
+          FirestorePayloadValidator.validateCandidate(candidate.candidate!);
+          callRef.collection('callerCandidates').add({
+            'candidate': candidate.candidate,
+            'sdpMid': candidate.sdpMid,
+            'sdpMLineIndex': candidate.sdpMLineIndex,
+          });
+        } catch (e) {
+          debugPrint('[Signaling] Throttled or skipped candidate: $e');
+        }
       }
     };
 
     // Create SDP Offer
     final RTCSessionDescription offer = await _peerConnection!.createOffer();
     await _peerConnection!.setLocalDescription(offer);
+    FirestorePayloadValidator.validateSdp(offer.sdp ?? '');
 
     await callRef.set({
       'offer': {'type': offer.type, 'sdp': offer.sdp},
@@ -106,25 +133,32 @@ class SignalingService {
     final List<RTCIceCandidate> candidateQueue = [];
     bool hasSetRemote = false;
 
-    // Listen for Callee's SDP Answer
+    // Listen for Callee's SDP Answer & Session State
     _roomSubscription = callRef.snapshots().listen((snapshot) async {
       final data = snapshot.data();
-      if (data != null && data['answer'] != null && !hasSetRemote) {
-        hasSetRemote = true;
-        debugPrint('[Signaling] Caller received SDP answer from address owner!');
-        final answerMap = data['answer'] as Map<String, dynamic>;
-        final answer = RTCSessionDescription(answerMap['sdp'], answerMap['type']);
-        await _peerConnection?.setRemoteDescription(answer);
-
-        // Drain buffered candidates
-        for (final cand in candidateQueue) {
-          try {
-            await _peerConnection?.addCandidate(cand);
-          } catch (e) {
-            debugPrint('[Signaling] Error adding queued ICE candidate: $e');
-          }
+      if (data != null) {
+        if (data['status'] == 'ended') {
+          debugPrint('[Signaling] Call session ended by peer.');
+          onConnectionStateChange?.call(RTCPeerConnectionState.RTCPeerConnectionStateClosed);
+          return;
         }
-        candidateQueue.clear();
+        if (data['answer'] != null && !hasSetRemote) {
+          hasSetRemote = true;
+          debugPrint('[Signaling] Caller received SDP answer from address owner!');
+          final answerMap = data['answer'] as Map<String, dynamic>;
+          final answer = RTCSessionDescription(answerMap['sdp'], answerMap['type']);
+          await _peerConnection?.setRemoteDescription(answer);
+
+          // Drain buffered candidates
+          for (final cand in candidateQueue) {
+            try {
+              await _peerConnection?.addCandidate(cand);
+            } catch (e) {
+              debugPrint('[Signaling] Error adding queued ICE candidate: $e');
+            }
+          }
+          candidateQueue.clear();
+        }
       }
     });
 
@@ -163,8 +197,11 @@ class SignalingService {
     final clean = UserAddress.normalizeId(addressId);
     if (_addressListeners.containsKey(clean)) return;
 
+    final firestore = _firestore;
+    if (firestore == null) return;
+
     debugPrint('[Signaling] Starting background listener on address: $clean');
-    final addressRef = _firestore.collection('addresses').doc(clean);
+    final addressRef = firestore.collection('addresses').doc(clean);
 
     // Ensure document exists
     addressRef.set({
@@ -206,6 +243,7 @@ class SignalingService {
 
   /// Address Owner (Callee): Accept & answer an incoming call request
   Future<void> answerAddressCall(IncomingCallRequest call) async {
+    FirestoreRateLimiter().enforce('answer_call');
     _activeSessionRef = call.callRef;
     _currentRoomId = '${call.addressId}/${call.callId}';
     debugPrint('[Signaling] Answering call on address: ${call.addressId}');
@@ -221,14 +259,20 @@ class SignalingService {
       onDataChannelReady?.call(channel);
     };
 
-    // Callee ICE candidates written to calleeCandidates
+    // Callee ICE candidates written to calleeCandidates with rate limit
     _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
       if (candidate.candidate != null && candidate.candidate!.isNotEmpty) {
-        call.callRef.collection('calleeCandidates').add({
-          'candidate': candidate.candidate,
-          'sdpMid': candidate.sdpMid,
-          'sdpMLineIndex': candidate.sdpMLineIndex,
-        });
+        try {
+          FirestoreRateLimiter().enforce('trickle_candidate');
+          FirestorePayloadValidator.validateCandidate(candidate.candidate!);
+          call.callRef.collection('calleeCandidates').add({
+            'candidate': candidate.candidate,
+            'sdpMid': candidate.sdpMid,
+            'sdpMLineIndex': candidate.sdpMLineIndex,
+          });
+        } catch (e) {
+          debugPrint('[Signaling] Throttled or skipped candidate: $e');
+        }
       }
     };
 
@@ -242,10 +286,20 @@ class SignalingService {
     // Create SDP Answer
     final RTCSessionDescription answer = await _peerConnection!.createAnswer();
     await _peerConnection!.setLocalDescription(answer);
+    FirestorePayloadValidator.validateSdp(answer.sdp ?? '');
 
     await call.callRef.update({
       'answer': {'type': answer.type, 'sdp': answer.sdp},
       'status': 'connected',
+    });
+
+    // Listen for Call Status (if caller cancels or ends)
+    _roomSubscription = call.callRef.snapshots().listen((snapshot) {
+      final data = snapshot.data() as Map<String, dynamic>?;
+      if (data != null && data['status'] == 'ended') {
+        debugPrint('[Signaling] Call session ended by caller.');
+        onConnectionStateChange?.call(RTCPeerConnectionState.RTCPeerConnectionStateClosed);
+      }
     });
 
     // Listen for Caller ICE candidates
@@ -278,7 +332,10 @@ class SignalingService {
 
   /// Initialize caller side: creates room, creates data channel, posts SDP offer
   Future<String> createRoom() async {
-    final roomRef = _firestore.collection('rooms').doc();
+    FirestoreRateLimiter().enforce('create_room');
+    final firestore = _firestore;
+    if (firestore == null) throw StateError('Firestore is not initialized');
+    final roomRef = firestore.collection('rooms').doc();
     _activeSessionRef = roomRef;
     _currentRoomId = roomRef.id;
     debugPrint('[Signaling] Creating direct room: $_currentRoomId');
@@ -295,17 +352,22 @@ class SignalingService {
     // Collect ICE candidates and write to callerCandidates
     _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
       if (candidate.candidate != null && candidate.candidate!.isNotEmpty) {
-        roomRef.collection('callerCandidates').add({
-          'candidate': candidate.candidate,
-          'sdpMid': candidate.sdpMid,
-          'sdpMLineIndex': candidate.sdpMLineIndex,
-        });
+        try {
+          FirestoreRateLimiter().enforce('trickle_candidate');
+          FirestorePayloadValidator.validateCandidate(candidate.candidate!);
+          roomRef.collection('callerCandidates').add({
+            'candidate': candidate.candidate,
+            'sdpMid': candidate.sdpMid,
+            'sdpMLineIndex': candidate.sdpMLineIndex,
+          });
+        } catch (_) {}
       }
     };
 
     // Create SDP Offer
     final RTCSessionDescription offer = await _peerConnection!.createOffer();
     await _peerConnection!.setLocalDescription(offer);
+    FirestorePayloadValidator.validateSdp(offer.sdp ?? '');
 
     await roomRef.set({
       'offer': {'type': offer.type, 'sdp': offer.sdp},
@@ -316,23 +378,30 @@ class SignalingService {
     final List<RTCIceCandidate> candidateQueue = [];
     bool hasSetRemote = false;
 
-    // Listen for Callee's SDP Answer
+    // Listen for Callee's SDP Answer & Session state
     _roomSubscription = roomRef.snapshots().listen((snapshot) async {
       final data = snapshot.data();
-      if (data != null && data['answer'] != null && !hasSetRemote) {
-        hasSetRemote = true;
-        final answerMap = data['answer'] as Map<String, dynamic>;
-        final answer = RTCSessionDescription(answerMap['sdp'], answerMap['type']);
-        await _peerConnection?.setRemoteDescription(answer);
-
-        for (final cand in candidateQueue) {
-          try {
-            await _peerConnection?.addCandidate(cand);
-          } catch (e) {
-            debugPrint('[Signaling] Error adding queued ICE candidate: $e');
-          }
+      if (data != null) {
+        if (data['status'] == 'ended') {
+          debugPrint('[Signaling] Room session ended by peer.');
+          onConnectionStateChange?.call(RTCPeerConnectionState.RTCPeerConnectionStateClosed);
+          return;
         }
-        candidateQueue.clear();
+        if (data['answer'] != null && !hasSetRemote) {
+          hasSetRemote = true;
+          final answerMap = data['answer'] as Map<String, dynamic>;
+          final answer = RTCSessionDescription(answerMap['sdp'], answerMap['type']);
+          await _peerConnection?.setRemoteDescription(answer);
+
+          for (final cand in candidateQueue) {
+            try {
+              await _peerConnection?.addCandidate(cand);
+            } catch (e) {
+              debugPrint('[Signaling] Error adding queued ICE candidate: $e');
+            }
+          }
+          candidateQueue.clear();
+        }
       }
     });
 
@@ -365,14 +434,18 @@ class SignalingService {
 
   /// Initialize callee side: joins existing room, receives offer, posts answer
   Future<void> joinRoom(String roomId) async {
+    FirestoreRateLimiter().enforce('join_room');
     final clean = roomId.trim();
     // If it's an address format, dispatch to calling address instead!
     if (clean.startsWith('bored_') || clean.startsWith('bored:')) {
       await callAddress(clean);
       return;
     }
+    FirestorePayloadValidator.validateId(clean, name: 'Room ID');
 
-    final roomRef = _firestore.collection('rooms').doc(clean);
+    final firestore = _firestore;
+    if (firestore == null) throw StateError('Firestore is not initialized');
+    final roomRef = firestore.collection('rooms').doc(clean);
     _activeSessionRef = roomRef;
     _currentRoomId = clean;
     final roomSnapshot = await roomRef.get();
@@ -394,11 +467,15 @@ class SignalingService {
     // Callee ICE candidates written to calleeCandidates
     _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
       if (candidate.candidate != null && candidate.candidate!.isNotEmpty) {
-        roomRef.collection('calleeCandidates').add({
-          'candidate': candidate.candidate,
-          'sdpMid': candidate.sdpMid,
-          'sdpMLineIndex': candidate.sdpMLineIndex,
-        });
+        try {
+          FirestoreRateLimiter().enforce('trickle_candidate');
+          FirestorePayloadValidator.validateCandidate(candidate.candidate!);
+          roomRef.collection('calleeCandidates').add({
+            'candidate': candidate.candidate,
+            'sdpMid': candidate.sdpMid,
+            'sdpMLineIndex': candidate.sdpMLineIndex,
+          });
+        } catch (_) {}
       }
     };
 
@@ -411,10 +488,20 @@ class SignalingService {
     // Create SDP Answer
     final RTCSessionDescription answer = await _peerConnection!.createAnswer();
     await _peerConnection!.setLocalDescription(answer);
+    FirestorePayloadValidator.validateSdp(answer.sdp ?? '');
 
     await roomRef.update({
       'answer': {'type': answer.type, 'sdp': answer.sdp},
       'status': 'connected',
+    });
+
+    // Listen for room status
+    _roomSubscription = roomRef.snapshots().listen((snapshot) {
+      final roomData = snapshot.data();
+      if (roomData != null && roomData['status'] == 'ended') {
+        debugPrint('[Signaling] Room session ended by peer.');
+        onConnectionStateChange?.call(RTCPeerConnectionState.RTCPeerConnectionStateClosed);
+      }
     });
 
     // Listen for Caller ICE candidates
@@ -467,6 +554,7 @@ class SignalingService {
 
     if (_activeSessionRef != null) {
       try {
+        await _activeSessionRef!.update({'status': 'ended'});
         final callerCandidates = await _activeSessionRef!.collection('callerCandidates').get();
         for (final doc in callerCandidates.docs) {
           await doc.reference.delete();

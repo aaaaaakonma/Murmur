@@ -4,6 +4,8 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
+import 'package:file_picker/file_picker.dart';
+import '../services/file_download_helper.dart';
 import '../services/p2p_chat_service.dart';
 import '../services/signaling_service.dart';
 import '../widgets/deniable_packet_inspector.dart';
@@ -173,70 +175,263 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  void _handleAttachPayload() {
-    showDialog(
+  Future<void> _handleAttachMedia() async {
+    final isSecure = widget.chatService.isPresenceActive;
+    if (!isSecure) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Cannot send media: peer presence is not active.'),
+          backgroundColor: Color(0xFFEF4444),
+        ),
+      );
+      return;
+    }
+
+    final source = await showModalBottomSheet<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF111113),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(4),
-          side: const BorderSide(color: Color(0xFF27272A)),
-        ),
-        title: const Row(
-          children: [
-            Icon(Icons.attachment, size: 16, color: Colors.white),
-            SizedBox(width: 8),
-            Text(
-              'Attach Staged Payload',
-              style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600),
-            ),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Send pre-computed manifest or zero-knowledge proof digest to peer:',
-              style: TextStyle(color: Color(0xFFA1A1AA), fontSize: 12),
-            ),
-            const SizedBox(height: 12),
-            Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: const Color(0xFF09090B),
-                border: Border.all(color: const Color(0xFF27272A)),
-                borderRadius: BorderRadius.circular(2),
+      backgroundColor: const Color(0xFF111113),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(8)),
+        side: BorderSide(color: Color(0xFF27272A)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Row(
+                children: [
+                  Icon(Icons.lock_outline, size: 16, color: Color(0xFF10B981)),
+                  SizedBox(width: 8),
+                  Text(
+                    'ENCRYPTED P2P MEDIA TRANSFER',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 0.6,
+                    ),
+                  ),
+                ],
               ),
-              child: const Text(
-                '{\n  "epoch": 42,\n  "bundle_id": "0x9ef2a07c42b8109d",\n  "chunk_count": 64,\n  "mac_reconstructed": true\n}',
-                style: TextStyle(color: Color(0xFFA1A1AA), fontFamily: 'JetBrains Mono', fontSize: 11),
+              const SizedBox(height: 6),
+              const Text(
+                'Media is chunked, encrypted with AES-256-GCM, and streamed directly via WebRTC. Plaintext exists strictly in ephemeral RAM.',
+                style: TextStyle(color: Color(0xFFA1A1AA), fontSize: 11),
               ),
-            ),
-          ],
+              const SizedBox(height: 16),
+              ListTile(
+                leading: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1E293B),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: const Icon(Icons.image, color: Color(0xFF60A5FA), size: 18),
+                ),
+                title: const Text('Send Image', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w500)),
+                subtitle: const Text('PNG, JPG, WebP, GIF (up to 20 MB)', style: TextStyle(color: Color(0xFF71717A), fontSize: 11)),
+                onTap: () => Navigator.of(ctx).pop('image'),
+              ),
+              ListTile(
+                leading: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF14241B),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: const Icon(Icons.insert_drive_file, color: Color(0xFF34D399), size: 18),
+                ),
+                title: const Text('Send Document / Binary', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w500)),
+                subtitle: const Text('PDF, TXT, ZIP, Code, or any binary (up to 20 MB)', style: TextStyle(color: Color(0xFF71717A), fontSize: 11)),
+                onTap: () => Navigator.of(ctx).pop('file'),
+              ),
+            ],
+          ),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Cancel', style: TextStyle(color: Color(0xFF71717A), fontSize: 12)),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.white,
-              foregroundColor: const Color(0xFF09090B),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(2)),
-            ),
-            onPressed: () {
-              Navigator.of(ctx).pop();
-              widget.chatService.sendMessage(
-                '{\n  "epoch": 42,\n  "bundle_id": "0x9ef2a07c42b8109d",\n  "chunk_count": 64,\n  "mac_reconstructed": true\n}',
-              );
-            },
-            child: const Text('Inject Payload', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 12)),
-          ),
-        ],
       ),
     );
+
+    if (source == null) return;
+
+    try {
+      PlatformFile? file;
+      if (source == 'image') {
+        file = await FilePicker.pickFile(
+          type: FileType.image,
+        );
+      } else {
+        file = await FilePicker.pickFile(
+          type: FileType.any,
+        );
+      }
+
+      if (file == null) return;
+      final bytes = await file.readAsBytes();
+
+      if (bytes.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not read file data. Please select another file.'),
+            backgroundColor: Color(0xFFEF4444),
+          ),
+        );
+        return;
+      }
+
+      if (bytes.length > 20 * 1024 * 1024) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('File exceeds 20 MB maximum size limit.'),
+            backgroundColor: Color(0xFFEF4444),
+          ),
+        );
+        return;
+      }
+
+      await widget.chatService.sendMediaFile(
+        fileName: file.name,
+        bytes: bytes,
+      );
+      _scrollToBottom();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to transmit media: $e'),
+          backgroundColor: const Color(0xFFEF4444),
+        ),
+      );
+    }
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent + 80,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  void _showImageLightbox(ChatMediaAttachment attachment) {
+    if (attachment.bytes == null) return;
+    showDialog(
+      context: context,
+      barrierColor: const Color(0xD9000000),
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.all(12),
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 900, maxHeight: 800),
+          decoration: BoxDecoration(
+            color: const Color(0xFF09090B),
+            border: Border.all(color: const Color(0xFF27272A)),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Top Bar
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: const BoxDecoration(
+                  border: Border(bottom: BorderSide(color: Color(0xFF27272A))),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.lock, size: 14, color: Color(0xFF10B981)),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        attachment.fileName,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ),
+                    Text(
+                      _formatFileSize(attachment.fileSize),
+                      style: const TextStyle(
+                        color: Color(0xFFA1A1AA),
+                        fontFamily: 'JetBrains Mono',
+                        fontSize: 11,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    IconButton(
+                      icon: const Icon(Icons.download, size: 18, color: Colors.white),
+                      tooltip: 'Save Image',
+                      onPressed: () {
+                        saveFileToDevice(attachment.fileName, attachment.bytes!);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Saving ${attachment.fileName}...')),
+                        );
+                      },
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, size: 18, color: Color(0xFFA1A1AA)),
+                      onPressed: () => Navigator.of(ctx).pop(),
+                    ),
+                  ],
+                ),
+              ),
+
+              // Image Content with interactive zoom & pan
+              Flexible(
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: InteractiveViewer(
+                    maxScale: 5.0,
+                    child: Image.memory(
+                      attachment.bytes!,
+                      fit: BoxFit.contain,
+                    ),
+                  ),
+                ),
+              ),
+
+              // Bottom SHA-256 hash bar
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                decoration: const BoxDecoration(
+                  border: Border(top: BorderSide(color: Color(0xFF27272A))),
+                  color: Color(0xFF111113),
+                ),
+                child: Row(
+                  children: [
+                    const Text('SHA-256: ', style: TextStyle(color: Color(0xFF71717A), fontSize: 10, fontFamily: 'JetBrains Mono')),
+                    Expanded(
+                      child: Text(
+                        attachment.sha256,
+                        style: const TextStyle(color: Color(0xFFA1A1AA), fontSize: 10, fontFamily: 'JetBrains Mono'),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  static String _formatFileSize(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(2)} MB';
   }
 
   void _handlePurgeBuffer() {
@@ -265,6 +460,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
     final bodyContent = LayoutBuilder(
       builder: (context, constraints) {
+        if (status == SessionStatus.disconnected) {
+          return _buildPresenceTerminatedView();
+        }
+
         final isWide = constraints.maxWidth >= 820;
 
         if (isWide) {
@@ -277,13 +476,13 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
               // Main Conversation Stream
               Expanded(
-                child: _buildMainConversationStream(isSecure, peerName, peerFp),
+                child: _buildMainConversationStream(isSecure, peerName, peerFp, localNodeId: localNodeId),
               ),
             ],
           );
         } else {
-          // Compact mobile layout: Main chat with a drawer / bottom sheet for sidebar tabs
-          return _buildMainConversationStream(isSecure, peerName, peerFp);
+          // Compact mobile layout: Main chat with responsive bottom-sheet access for telemetry/audit
+          return _buildMainConversationStream(isSecure, peerName, peerFp, localNodeId: localNodeId);
         }
       },
     );
@@ -330,9 +529,266 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   // =========================================================================
+  // PRESENCE TERMINATED & MEMORY WIPED VIEW
+  // =========================================================================
+  Widget _buildPresenceTerminatedView() {
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 540),
+          decoration: BoxDecoration(
+            color: const Color(0xFF101013),
+            borderRadius: BorderRadius.circular(4),
+            border: Border.all(color: const Color(0xFF7F1D1D)),
+            boxShadow: const [
+              BoxShadow(color: Colors.black54, blurRadius: 28, offset: Offset(0, 14)),
+            ],
+          ),
+          child: Stack(
+            children: [
+              Positioned(top: -1, left: -1, child: _buildReticleCorner(topLeft: true)),
+              Positioned(top: -1, right: -1, child: _buildReticleCorner(topRight: true)),
+              Positioned(bottom: -1, left: -1, child: _buildReticleCorner(bottomLeft: true)),
+              Positioned(bottom: -1, right: -1, child: _buildReticleCorner(bottomRight: true)),
+
+              Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Container(
+                          width: 38,
+                          height: 38,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF261012),
+                            borderRadius: BorderRadius.circular(3),
+                            border: Border.all(color: const Color(0xFF7F1D1D)),
+                          ),
+                          child: const Center(
+                            child: Icon(Icons.lock_reset_rounded, size: 20, color: Color(0xFFEF4444)),
+                          ),
+                        ),
+                        const SizedBox(width: 14),
+                        const Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'ACTIVE PRESENCE TERMINATED',
+                                style: TextStyle(
+                                  fontFamily: 'JetBrains Mono',
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13,
+                                  letterSpacing: 2.0,
+                                  color: Color(0xFFEF4444),
+                                ),
+                              ),
+                              SizedBox(height: 3),
+                              Text(
+                                'Volatile RAM Cleared & Past History Sealed',
+                                style: TextStyle(color: Color(0xFFA1A1AA), fontSize: 11),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 20),
+                    const Text(
+                      'One party has disconnected or left the session. Under the 2-of-2 secret sharing security protocol, active mutual presence has been revoked.',
+                      style: TextStyle(color: Color(0xFFD4D4D8), fontSize: 12, height: 1.5),
+                    ),
+                    const SizedBox(height: 16),
+
+                    // Audit specs
+                    _buildSecurityStatusRow(
+                      'RAM ZEROIZATION',
+                      'Reconstructed cache key K (s₁ ⊕ s₂) and ephemeral keys overwritten with zeros (0x00) in RAM.',
+                      Icons.memory_rounded,
+                      const Color(0xFF10B981),
+                    ),
+                    const SizedBox(height: 8),
+                    _buildSecurityStatusRow(
+                      'TRANSCRIPT PURGED',
+                      'All in-memory decrypted messages cleared immediately from application memory.',
+                      Icons.cleaning_services_rounded,
+                      const Color(0xFF10B981),
+                    ),
+                    const SizedBox(height: 8),
+                    _buildSecurityStatusRow(
+                      'AT-REST CIPHERTEXT',
+                      'Disk history is sealed under unbreakable AES-GCM-256 without peer share s₂.',
+                      Icons.shield_outlined,
+                      const Color(0xFF60A5FA),
+                    ),
+                    const SizedBox(height: 24),
+
+                    FilledButton.icon(
+                      icon: const Icon(Icons.refresh_rounded, size: 14, color: Color(0xFF09090B)),
+                      label: const Text('Return to Mesh Standby', style: TextStyle(color: Color(0xFF09090B), fontSize: 12, fontWeight: FontWeight.bold)),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(3)),
+                      ),
+                      onPressed: () async {
+                        await widget.chatService.resetToIdle();
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSecurityStatusRow(String title, String desc, IconData icon, Color color) {
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF141418),
+        borderRadius: BorderRadius.circular(2),
+        border: Border.all(color: const Color(0xFF27272A)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 16, color: color),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    fontFamily: 'JetBrains Mono',
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                    color: color,
+                    letterSpacing: 0.8,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  desc,
+                  style: const TextStyle(fontSize: 11, color: Color(0xFF71717A), height: 1.3),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showMobileSidebar(BuildContext context, bool isSecure, String peerName, String localNodeId) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF0C0C0E),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(10)),
+      ),
+      builder: (ctx) {
+        return SizedBox(
+          height: MediaQuery.of(context).size.height * 0.78,
+          child: Column(
+            children: [
+              Container(
+                margin: const EdgeInsets.symmetric(vertical: 8),
+                width: 36,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF3F3F46),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              Expanded(
+                child: _buildOperationalSidebar(isSecure, peerName, localNodeId),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  // =========================================================================
   // TOP APP BAR
   // =========================================================================
   Widget _buildTopAppBar(String peerName, bool isSecure, String localNodeId) {
+    final isMobile = MediaQuery.of(context).size.width < 700;
+
+    if (isMobile) {
+      return Container(
+        height: 44,
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        decoration: const BoxDecoration(
+          color: Color(0xFF09090B),
+          border: Border(bottom: BorderSide(color: Color(0xFF27272A))),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 14,
+                  height: 14,
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(1),
+                  ),
+                  alignment: Alignment.center,
+                  child: Container(
+                    width: 6,
+                    height: 6,
+                    color: const Color(0xFF09090B),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                const Text(
+                  'MURMUR',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 2.0,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '• $peerName',
+                  style: const TextStyle(color: Color(0xFFA1A1AA), fontSize: 11),
+                ),
+              ],
+            ),
+            Row(
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.tune_rounded, size: 16, color: Color(0xFFA1A1AA)),
+                  tooltip: 'Telemetry & Security',
+                  onPressed: () => _showMobileSidebar(context, isSecure, peerName, localNodeId),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.power_settings_new, size: 16, color: Color(0xFFEF4444)),
+                  tooltip: 'End Session',
+                  onPressed: _handleEndSession,
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+    }
+
     return Container(
       height: 44,
       padding: const EdgeInsets.symmetric(horizontal: 14),
@@ -1147,13 +1603,13 @@ class _ChatScreenState extends State<ChatScreen> {
   // =========================================================================
   // MAIN CONVERSATION / DATA STREAM
   // =========================================================================
-  Widget _buildMainConversationStream(bool isSecure, String peerName, String peerFp) {
+  Widget _buildMainConversationStream(bool isSecure, String peerName, String peerFp, {String localNodeId = '0x4b7e'}) {
     final isInRoom = widget.chatService.roomId != null;
     final incomingCall = widget.chatService.incomingCall;
 
     return Column(
       children: [
-        // Active Peer Details Header
+        // Responsive Active Peer Details Header
         Container(
           height: 40,
           padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -1161,123 +1617,209 @@ class _ChatScreenState extends State<ChatScreen> {
             color: Color(0xFF0C0C0E),
             border: Border(bottom: BorderSide(color: Color(0xFF27272A))),
           ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              // Peer name & Fingerprint badge
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    width: 6,
-                    height: 6,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: isInRoom
-                          ? (isSecure ? const Color(0xFF10B981) : const Color(0xFFF59E0B))
-                          : const Color(0xFF71717A),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    isInRoom ? peerName : 'DIRECT MESH CHANNEL',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF111113),
-                      border: Border.all(color: const Color(0xFF27272A)),
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                    child: Text(
-                      isInRoom ? peerFp : 'STANDBY',
-                      style: const TextStyle(
-                        fontFamily: 'JetBrains Mono',
-                        fontSize: 10,
-                        color: Color(0xFF71717A),
+          child: LayoutBuilder(
+            builder: (context, headerConstraints) {
+              final isNarrow = headerConstraints.maxWidth < 680;
+              if (isNarrow) {
+                return Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    // Left: Peer name & status
+                    Expanded(
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 6,
+                            height: 6,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: isInRoom
+                                  ? (isSecure ? const Color(0xFF10B981) : const Color(0xFFF59E0B))
+                                  : const Color(0xFF71717A),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Flexible(
+                            child: Text(
+                              isInRoom ? peerName : 'DIRECT MESH CHANNEL',
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                          if (isInRoom) ...[
+                            const SizedBox(width: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF111113),
+                                border: Border.all(color: const Color(0xFF27272A)),
+                                borderRadius: BorderRadius.circular(2),
+                              ),
+                              child: Text(
+                                isSecure ? '3DH VERIFIED' : 'NEGOTIATING',
+                                style: TextStyle(
+                                  fontFamily: 'JetBrains Mono',
+                                  fontSize: 9,
+                                  color: isSecure ? const Color(0xFF10B981) : const Color(0xFFF59E0B),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
                       ),
                     ),
-                  ),
-                  if (isInRoom) ...[
-                    const SizedBox(width: 10),
-                    const Text('|', style: TextStyle(color: Color(0xFF27272A))),
-                    const SizedBox(width: 10),
+
+                    // Right: Mobile Telemetry & End Session
                     Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(
-                          isSecure ? 'Verified Handshake' : 'Negotiating Channels...',
-                          style: TextStyle(
-                            color: isSecure ? const Color(0xFF10B981) : const Color(0xFFF59E0B),
-                            fontSize: 11,
-                            fontWeight: FontWeight.w500,
-                          ),
+                        IconButton(
+                          icon: const Icon(Icons.tune_rounded, size: 16, color: Color(0xFFA1A1AA)),
+                          tooltip: 'Telemetry & Audit Logs',
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                          onPressed: () => _showMobileSidebar(context, isSecure, peerName, localNodeId),
                         ),
+                        if (isInRoom) ...[
+                          const SizedBox(width: 4),
+                          IconButton(
+                            icon: const Icon(Icons.power_settings_new, size: 16, color: Color(0xFFEF4444)),
+                            tooltip: 'End Session',
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                            onPressed: _handleEndSession,
+                          ),
+                        ],
                       ],
                     ),
                   ],
-                ],
-              ),
+                );
+              }
 
-              // Right link parameters
-              Row(
-                mainAxisSize: MainAxisSize.min,
+              // Wide Desktop Header
+              return Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  if (widget.chatService.packetLog.isNotEmpty) ...[
-                    InkWell(
-                      onTap: () => _showPacketInspector(),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                        margin: const EdgeInsets.only(right: 8),
+                  // Peer name & Fingerprint badge
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 6,
+                        height: 6,
                         decoration: BoxDecoration(
-                          color: const Color(0xFF18181D),
-                          borderRadius: BorderRadius.circular(2),
-                          border: Border.all(color: const Color(0xFF27272A)),
+                          shape: BoxShape.circle,
+                          color: isInRoom
+                              ? (isSecure ? const Color(0xFF10B981) : const Color(0xFFF59E0B))
+                              : const Color(0xFF71717A),
                         ),
-                        child: const Row(
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        isInRoom ? peerName : 'DIRECT MESH CHANNEL',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF111113),
+                          border: Border.all(color: const Color(0xFF27272A)),
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                        child: Text(
+                          isInRoom ? peerFp : 'STANDBY',
+                          style: const TextStyle(
+                            fontFamily: 'JetBrains Mono',
+                            fontSize: 10,
+                            color: Color(0xFF71717A),
+                          ),
+                        ),
+                      ),
+                      if (isInRoom) ...[
+                        const SizedBox(width: 10),
+                        const Text('|', style: TextStyle(color: Color(0xFF27272A))),
+                        const SizedBox(width: 10),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            Icon(Icons.history, size: 12, color: Color(0xFFA1A1AA)),
-                            SizedBox(width: 4),
-                            Text('Audit Log', style: TextStyle(color: Color(0xFFA1A1AA), fontSize: 10)),
+                            Text(
+                              isSecure ? 'Verified Handshake' : 'Negotiating Channels...',
+                              style: TextStyle(
+                                color: isSecure ? const Color(0xFF10B981) : const Color(0xFFF59E0B),
+                                fontSize: 11,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
                           ],
                         ),
-                      ),
-                    ),
-                  ],
-                  Text(
-                    isInRoom ? 'SCTP: ${_latency.toStringAsFixed(1)} ms' : 'SCTP: Idle',
-                    style: const TextStyle(
-                      fontFamily: 'JetBrains Mono',
-                      fontSize: 11,
-                      color: Color(0xFF71717A),
-                    ),
+                      ],
+                    ],
                   ),
-                  const SizedBox(width: 12),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF111113),
-                      border: Border.all(color: const Color(0xFF1F1F23)),
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                    child: Text(
-                      isInRoom ? 'Deniable Ratchet' : 'Argon2id Pinned',
-                      style: const TextStyle(
-                        fontFamily: 'JetBrains Mono',
-                        fontSize: 10,
-                        color: Color(0xFFA1A1AA),
+
+                  // Right link parameters
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (widget.chatService.packetLog.isNotEmpty) ...[
+                        InkWell(
+                          onTap: () => _showPacketInspector(),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                            margin: const EdgeInsets.only(right: 8),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF18181D),
+                              borderRadius: BorderRadius.circular(2),
+                              border: Border.all(color: const Color(0xFF27272A)),
+                            ),
+                            child: const Row(
+                              children: [
+                                Icon(Icons.history, size: 12, color: Color(0xFFA1A1AA)),
+                                SizedBox(width: 4),
+                                Text('Audit Log', style: TextStyle(color: Color(0xFFA1A1AA), fontSize: 10)),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                      Text(
+                        isInRoom ? 'SCTP: ${_latency.toStringAsFixed(1)} ms' : 'SCTP: Idle',
+                        style: const TextStyle(
+                          fontFamily: 'JetBrains Mono',
+                          fontSize: 11,
+                          color: Color(0xFF71717A),
+                        ),
                       ),
-                    ),
+                      const SizedBox(width: 12),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF111113),
+                          border: Border.all(color: const Color(0xFF1F1F23)),
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                        child: Text(
+                          isInRoom ? 'Deniable Ratchet' : 'Argon2id Pinned',
+                          style: const TextStyle(
+                            fontFamily: 'JetBrains Mono',
+                            fontSize: 10,
+                            color: Color(0xFFA1A1AA),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ],
-              ),
-            ],
+              );
+            },
           ),
         ),
 
@@ -1903,8 +2445,10 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
               borderRadius: BorderRadius.circular(2),
             ),
-            child: isJsonPayload
-                ? Column(
+            child: message.attachment != null
+                ? _buildAttachmentWidget(message.attachment!, isMe)
+                : isJsonPayload
+                    ? Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       // Technical Payload Card
@@ -2048,12 +2592,232 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  // =========================================================================
-  // DOCKED CLINICAL COMPOSER
-  // =========================================================================
-  Widget _buildDockedComposer(bool isSecure, String peerName) {
+  Widget _buildAttachmentWidget(ChatMediaAttachment attachment, bool isMe) {
+    if (!attachment.isComplete) {
+      return Container(
+        constraints: const BoxConstraints(maxWidth: 340),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: const Color(0xFF09090B),
+          border: Border.all(color: const Color(0xFF27272A)),
+          borderRadius: BorderRadius.circular(2),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  attachment.isImage ? Icons.image : Icons.insert_drive_file,
+                  size: 16,
+                  color: const Color(0xFF60A5FA),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    attachment.fileName,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(2),
+              child: LinearProgressIndicator(
+                value: attachment.progress.clamp(0.0, 1.0),
+                backgroundColor: const Color(0xFF27272A),
+                valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF10B981)),
+                minHeight: 4,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  attachment.error != null
+                      ? 'Failed'
+                      : (isMe ? 'Encrypting & Streaming...' : 'Decrypting Stream...'),
+                  style: TextStyle(
+                    color: attachment.error != null ? const Color(0xFFEF4444) : const Color(0xFFA1A1AA),
+                    fontSize: 10,
+                    fontFamily: 'JetBrains Mono',
+                  ),
+                ),
+                Text(
+                  '${(attachment.progress * 100).toInt()}%',
+                  style: const TextStyle(
+                    color: Color(0xFF10B981),
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                    fontFamily: 'JetBrains Mono',
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (attachment.isImage && attachment.bytes != null) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          GestureDetector(
+            onTap: () => _showImageLightbox(attachment),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(2),
+              child: Stack(
+                children: [
+                  Container(
+                    constraints: const BoxConstraints(maxWidth: 420, maxHeight: 320),
+                    color: const Color(0xFF09090B),
+                    child: Image.memory(
+                      attachment.bytes!,
+                      fit: BoxFit.cover,
+                    ),
+                  ),
+                  Positioned(
+                    bottom: 6,
+                    right: 6,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: const Color(0xBF000000),
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.zoom_in, size: 12, color: Colors.white),
+                          SizedBox(width: 4),
+                          Text('Expand', style: TextStyle(color: Colors.white, fontSize: 10)),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                '${attachment.fileName} (${_formatFileSize(attachment.fileSize)})',
+                style: const TextStyle(color: Color(0xFFA1A1AA), fontSize: 10, fontFamily: 'JetBrains Mono'),
+              ),
+              const SizedBox(width: 10),
+              InkWell(
+                onTap: () {
+                  saveFileToDevice(attachment.fileName, attachment.bytes!);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Downloading ${attachment.fileName}...')),
+                  );
+                },
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.download, size: 12, color: Color(0xFF38BDF8)),
+                    SizedBox(width: 2),
+                    Text('Save', style: TextStyle(color: Color(0xFF38BDF8), fontSize: 10, fontWeight: FontWeight.w500)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ],
+      );
+    }
+
+    // Generic Document / File Card
     return Container(
-      padding: const EdgeInsets.all(12),
+      constraints: const BoxConstraints(maxWidth: 360),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF09090B),
+        border: Border.all(color: const Color(0xFF27272A)),
+        borderRadius: BorderRadius.circular(2),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1E293B),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+                child: const Icon(Icons.insert_drive_file, size: 20, color: Color(0xFF38BDF8)),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      attachment.fileName,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      _formatFileSize(attachment.fileSize),
+                      style: const TextStyle(
+                        color: Color(0xFF71717A),
+                        fontSize: 10,
+                        fontFamily: 'JetBrains Mono',
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (attachment.bytes != null) ...[
+                IconButton(
+                  icon: const Icon(Icons.download, size: 18, color: Color(0xFF10B981)),
+                  tooltip: 'Download File',
+                  onPressed: () {
+                    saveFileToDevice(attachment.fileName, attachment.bytes!);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Downloading ${attachment.fileName}...')),
+                    );
+                  },
+                ),
+              ],
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'SHA-256: ${attachment.sha256.length > 16 ? attachment.sha256.substring(0, 16) : attachment.sha256}...',
+            style: const TextStyle(
+              color: Color(0xFF52525B),
+              fontSize: 9,
+              fontFamily: 'JetBrains Mono',
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+  Widget _buildDockedComposer(bool isSecure, String peerName) {
+    final isMobile = MediaQuery.of(context).size.width < 600;
+
+    return Container(
+      padding: EdgeInsets.all(isMobile ? 8 : 12),
       decoration: const BoxDecoration(
         color: Color(0xFF0C0C0E),
         border: Border(top: BorderSide(color: Color(0xFF27272A))),
@@ -2085,7 +2849,11 @@ class _ChatScreenState extends State<ChatScreen> {
                     focusNode: _focusNode,
                     enabled: isSecure,
                     maxLines: 4,
-                    minLines: 2,
+                    minLines: 1,
+                    textInputAction: TextInputAction.send,
+                    onSubmitted: (_) {
+                      if (isSecure) _handleSend();
+                    },
                     style: const TextStyle(
                       color: Colors.white,
                       fontSize: 13,
@@ -2094,7 +2862,9 @@ class _ChatScreenState extends State<ChatScreen> {
                     ),
                     decoration: InputDecoration(
                       hintText: isSecure
-                          ? 'Type dispatch to $peerName... (Enter to send, Shift+Enter for newline)'
+                          ? (isMobile
+                              ? 'Type message to $peerName...'
+                              : 'Type dispatch to $peerName... (Enter to send, Shift+Enter for newline)')
                           : 'Waiting for remote peer presence handshake...',
                       hintStyle: const TextStyle(color: Color(0xFF52525B), fontSize: 13),
                       border: InputBorder.none,
@@ -2117,7 +2887,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   children: [
                     // Left: Attach button
                     InkWell(
-                      onTap: isSecure ? _handleAttachPayload : null,
+                      onTap: isSecure ? _handleAttachMedia : null,
                       borderRadius: BorderRadius.circular(2),
                       child: Container(
                         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -2137,23 +2907,25 @@ class _ChatScreenState extends State<ChatScreen> {
                       ),
                     ),
 
-                    // Right: Helper text & Send Button
+                    // Right: Helper text (if desktop) & Send Button
                     Row(
                       children: [
-                        const Text(
-                          'Press Enter to send',
-                          style: TextStyle(
-                            fontFamily: 'JetBrains Mono',
-                            fontSize: 10,
-                            color: Color(0xFF52525B),
+                        if (!isMobile) ...[
+                          const Text(
+                            'Press Enter to send',
+                            style: TextStyle(
+                              fontFamily: 'JetBrains Mono',
+                              fontSize: 10,
+                              color: Color(0xFF52525B),
+                            ),
                           ),
-                        ),
-                        const SizedBox(width: 12),
+                          const SizedBox(width: 12),
+                        ],
                         InkWell(
                           onTap: isSecure ? _handleSend : null,
                           borderRadius: BorderRadius.circular(2),
                           child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+                            padding: EdgeInsets.symmetric(horizontal: isMobile ? 12 : 14, vertical: 6),
                             decoration: BoxDecoration(
                               color: isSecure ? Colors.white : const Color(0xFF27272A),
                               borderRadius: BorderRadius.circular(2),

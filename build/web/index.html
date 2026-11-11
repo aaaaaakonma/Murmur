@@ -53,6 +53,14 @@
         }
       });
     }
+
+    // Teardown hook for browser tab close/refresh
+    window.addEventListener('beforeunload', function() {
+      window.dispatchEvent(new CustomEvent('murmur_beforeunload'));
+    });
+    window.addEventListener('pagehide', function() {
+      window.dispatchEvent(new CustomEvent('murmur_beforeunload'));
+    });
   </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>

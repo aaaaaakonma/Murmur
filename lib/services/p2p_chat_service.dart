@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' hide EncryptedPacket;
 import 'package:cryptography/cryptography.dart';
+import 'package:crypto/crypto.dart' as dart_crypto;
 import '../crypto/triple_dh.dart';
 import '../crypto/split_vault.dart';
 import '../crypto/deniable_cipher.dart';
@@ -12,6 +14,7 @@ import 'presence_history_store.dart';
 import 'user_address.dart';
 import 'saved_contact.dart';
 import 'notification_service.dart';
+import 'firestore_security.dart';
 
 enum SessionStatus {
   idle,
@@ -24,17 +27,75 @@ enum SessionStatus {
   error,
 }
 
+/// In-memory representation of an encrypted media or file attachment
+class ChatMediaAttachment {
+  final String fileId;
+  final String fileName;
+  final int fileSize;
+  final String mimeType;
+  final bool isImage;
+  final String sha256;
+  Uint8List? bytes; // Volatile ephemeral RAM only!
+  double progress; // 0.0 to 1.0
+  bool isComplete;
+  String? error;
+
+  ChatMediaAttachment({
+    required this.fileId,
+    required this.fileName,
+    required this.fileSize,
+    required this.mimeType,
+    required this.isImage,
+    required this.sha256,
+    this.bytes,
+    this.progress = 1.0,
+    this.isComplete = true,
+    this.error,
+  });
+
+  /// Explicitly zeroize media buffer from memory
+  void zeroize() {
+    if (bytes != null) {
+      bytes!.fillRange(0, bytes!.length, 0);
+      bytes = null;
+    }
+  }
+}
+
+class _IncomingFileAssembly {
+  final ChatMediaAttachment meta;
+  final List<Uint8List?> chunks;
+  int receivedChunks = 0;
+
+  _IncomingFileAssembly({
+    required this.meta,
+    required int totalChunks,
+  }) : chunks = List<Uint8List?>.filled(totalChunks, null);
+
+  void zeroize() {
+    for (final c in chunks) {
+      if (c != null) {
+        c.fillRange(0, c.length, 0);
+      }
+    }
+    chunks.clear();
+    meta.zeroize();
+  }
+}
+
 class ChatMessage {
   final String text;
   final bool isMe;
   final DateTime timestamp;
   final DeniablePacket? packet; // For packet & MAC disclosure inspection
+  final ChatMediaAttachment? attachment;
 
   ChatMessage({
     required this.text,
     required this.isMe,
     required this.timestamp,
     this.packet,
+    this.attachment,
   });
 }
 
@@ -63,6 +124,7 @@ class P2PChatService extends ChangeNotifier {
   final List<UserAddress> _addresses = [];
   final List<SavedContact> _contacts = [];
   IncomingCallRequest? _incomingCall;
+  final Map<String, _IncomingFileAssembly> _incomingAssemblies = {};
 
   SessionStatus get status => _status;
   String? get roomId => _roomId;
@@ -233,6 +295,7 @@ class P2PChatService extends ChangeNotifier {
 
   /// Generate a brand new disposable address (alias) that can be shared with a peer
   Future<UserAddress> generateAddress({String? label, bool isOneTime = false}) async {
+    FirestoreRateLimiter().enforce('create_address');
     final newAddr = UserAddress(
       id: UserAddress.generateId(),
       label: (label != null && label.trim().isNotEmpty)
@@ -513,6 +576,93 @@ class P2PChatService extends ChangeNotifier {
           notifyListeners();
           break;
 
+        case 'FILE_TRANSFER_START':
+          final fileId = data['fileId'] as String;
+          final fileName = data['fileName'] as String;
+          final fileSize = data['fileSize'] as int;
+          final mimeType = data['mimeType'] as String;
+          final totalChunks = data['totalChunks'] as int;
+          final fileSha256 = data['sha256'] as String;
+          final isImage = data['isImage'] as bool? ?? mimeType.startsWith('image/');
+
+          final incomingAttachment = ChatMediaAttachment(
+            fileId: fileId,
+            fileName: fileName,
+            fileSize: fileSize,
+            mimeType: mimeType,
+            isImage: isImage,
+            sha256: fileSha256,
+            bytes: null,
+            progress: 0.0,
+            isComplete: false,
+          );
+
+          final incomingMsg = ChatMessage(
+            text: isImage ? '[Image: $fileName]' : '[File: $fileName]',
+            isMe: false,
+            timestamp: DateTime.now(),
+            attachment: incomingAttachment,
+          );
+
+          _messages.add(incomingMsg);
+          _incomingAssemblies[fileId] = _IncomingFileAssembly(
+            meta: incomingAttachment,
+            totalChunks: totalChunks,
+          );
+          notifyListeners();
+          break;
+
+        case 'FILE_TRANSFER_CHUNK':
+          final fileId = data['fileId'] as String;
+          final chunkIndex = data['chunkIndex'] as int;
+          final assembly = _incomingAssemblies[fileId];
+          if (assembly != null && _deniableCipher != null) {
+            final packetMap = data['packet'] as Map<String, dynamic>;
+            final chunkPacket = DeniablePacket.fromJson(packetMap);
+            _packetLog.add(chunkPacket);
+
+            final decryptedBytes = await _deniableCipher!.decryptBytes(chunkPacket);
+            if (chunkIndex >= 0 && chunkIndex < assembly.chunks.length) {
+              if (assembly.chunks[chunkIndex] == null) {
+                assembly.chunks[chunkIndex] = Uint8List.fromList(decryptedBytes);
+                assembly.receivedChunks++;
+                assembly.meta.progress = assembly.receivedChunks / assembly.chunks.length;
+                notifyListeners();
+              }
+            }
+          }
+          break;
+
+        case 'FILE_TRANSFER_COMPLETE':
+          final fileId = data['fileId'] as String;
+          final expectedSha256 = data['sha256'] as String;
+          final assembly = _incomingAssemblies.remove(fileId);
+          if (assembly != null) {
+            final builder = BytesBuilder(copy: false);
+            for (final chunk in assembly.chunks) {
+              if (chunk != null) {
+                builder.add(chunk);
+              }
+            }
+            final assembledBytes = builder.toBytes();
+            final actualSha256 = dart_crypto.sha256.convert(assembledBytes).toString();
+            if (actualSha256 == expectedSha256) {
+              assembly.meta.bytes = assembledBytes;
+              assembly.meta.progress = 1.0;
+              assembly.meta.isComplete = true;
+            } else {
+              assembly.meta.error = 'Checksum validation failed: file corrupted in transit.';
+              debugPrint('[P2P] Checksum mismatch on file $fileId: expected $expectedSha256, got $actualSha256');
+            }
+            notifyListeners();
+          }
+          break;
+
+        case 'PEER_LEFT':
+          debugPrint('[P2P] Remote peer explicitly left. Wiping volatile RAM and sealing history...');
+          _onDisconnected();
+          break;
+
         default:
           debugPrint('Unknown packet type: $type');
       }
@@ -572,26 +722,182 @@ class P2PChatService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Encrypt and transmit media file (image, document, binary) in chunked deniable packets
+  Future<void> sendMediaFile({
+    required String fileName,
+    required Uint8List bytes,
+    String? mimeType,
+  }) async {
+    if (bytes.isEmpty) return;
+    if (_deniableCipher == null || _dataChannel == null) {
+      throw StateError('Channel or cipher not ready');
+    }
+
+    // 20MB safety limit to protect RAM and browser buffers
+    const maxSizeBytes = 20 * 1024 * 1024;
+    if (bytes.length > maxSizeBytes) {
+      throw ArgumentError('File exceeds max 20 MB size limit.');
+    }
+
+    final fileId = _generateRandomHex(8);
+    final detectedMime = mimeType ?? _detectMimeType(fileName);
+    final isImage = detectedMime.startsWith('image/');
+    final fileSha256 = dart_crypto.sha256.convert(bytes).toString();
+
+    // 16 KB safe WebRTC chunk size
+    const chunkSize = 16384;
+    final totalChunks = (bytes.length / chunkSize).ceil();
+
+    final attachment = ChatMediaAttachment(
+      fileId: fileId,
+      fileName: fileName,
+      fileSize: bytes.length,
+      mimeType: detectedMime,
+      isImage: isImage,
+      sha256: fileSha256,
+      bytes: bytes,
+      progress: 0.0,
+      isComplete: false,
+    );
+
+    final chatMsg = ChatMessage(
+      text: isImage ? '[Image: $fileName]' : '[File: $fileName]',
+      isMe: true,
+      timestamp: DateTime.now(),
+      attachment: attachment,
+    );
+
+    _messages.add(chatMsg);
+    notifyListeners();
+
+    try {
+      // 1. Send FILE_TRANSFER_START
+      final startPayload = jsonEncode({
+        'type': 'FILE_TRANSFER_START',
+        'fileId': fileId,
+        'fileName': fileName,
+        'fileSize': bytes.length,
+        'mimeType': detectedMime,
+        'totalChunks': totalChunks,
+        'sha256': fileSha256,
+        'isImage': isImage,
+      });
+      await _dataChannel!.send(RTCDataChannelMessage(startPayload));
+
+      // 2. Stream encrypted chunks
+      for (int i = 0; i < totalChunks; i++) {
+        final start = i * chunkSize;
+        final end = (start + chunkSize < bytes.length) ? start + chunkSize : bytes.length;
+        final slice = bytes.sublist(start, end);
+
+        final encryptedPacket = await _deniableCipher!.encryptBytes(slice);
+
+        final chunkPayload = jsonEncode({
+          'type': 'FILE_TRANSFER_CHUNK',
+          'fileId': fileId,
+          'chunkIndex': i,
+          'totalChunks': totalChunks,
+          'packet': encryptedPacket.toJson(),
+        });
+
+        await _dataChannel!.send(RTCDataChannelMessage(chunkPayload));
+
+        attachment.progress = (i + 1) / totalChunks;
+        notifyListeners();
+
+        // Brief yield for WebRTC bufferedAmount stability
+        if (totalChunks > 1) {
+          await Future.delayed(const Duration(milliseconds: 5));
+        }
+      }
+
+      // 3. Send FILE_TRANSFER_COMPLETE
+      final completePayload = jsonEncode({
+        'type': 'FILE_TRANSFER_COMPLETE',
+        'fileId': fileId,
+        'sha256': fileSha256,
+      });
+      await _dataChannel!.send(RTCDataChannelMessage(completePayload));
+
+      attachment.isComplete = true;
+      attachment.progress = 1.0;
+      notifyListeners();
+    } catch (e) {
+      attachment.error = 'Transfer failed: $e';
+      notifyListeners();
+      rethrow;
+    }
+  }
+
+  static String _detectMimeType(String fileName) {
+    final lower = fileName.toLowerCase();
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+    if (lower.endsWith('.gif')) return 'image/gif';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    if (lower.endsWith('.svg')) return 'image/svg+xml';
+    if (lower.endsWith('.pdf')) return 'application/pdf';
+    if (lower.endsWith('.txt') || lower.endsWith('.log')) return 'text/plain';
+    if (lower.endsWith('.zip')) return 'application/zip';
+    if (lower.endsWith('.json')) return 'application/json';
+    return 'application/octet-stream';
+  }
+
+  static String _generateRandomHex(int byteCount) {
+    final rnd = Random.secure();
+    return List.generate(byteCount, (_) => rnd.nextInt(256).toRadixString(16).padLeft(2, '0')).join();
+  }
+
   void _onDisconnected() {
     // CRITICAL: Zeroize K and remote share s2 from memory immediately!
     _vault.zeroizeSession();
     _tripleDH?.zeroizeEphemeral();
+    _deniableCipher = null;
+
+    // Zeroize all volatile media attachments in RAM
+    for (final msg in _messages) {
+      msg.attachment?.zeroize();
+    }
+    for (final assembly in _incomingAssemblies.values) {
+      assembly.zeroize();
+    }
+    _incomingAssemblies.clear();
+
+    // CRITICAL VULNERABILITY FIX: The moment one party leaves, active presence is terminated.
+    // All decrypted plaintext messages and packets MUST be immediately purged from volatile RAM.
+    _messages.clear();
+    _packetLog.clear();
+
     _status = SessionStatus.disconnected;
     notifyListeners();
   }
 
   /// Leave room and clean up session
   Future<void> leaveRoom() async {
+    try {
+      if (_dataChannel != null && _dataChannel!.state == RTCDataChannelState.RTCDataChannelOpen) {
+        final leavePkt = jsonEncode({
+          'type': 'PEER_LEFT',
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+        });
+        _dataChannel!.send(RTCDataChannelMessage(leavePkt));
+      }
+    } catch (e) {
+      debugPrint('[P2P] Notice: Could not send PEER_LEFT packet over data channel: $e');
+    }
+
     _onDisconnected();
     await _signalingService.disposeSession();
     _startAddressListeners();
     _roomId = null;
     _peerIdentityKeyHex = null;
-    _messages.clear();
-    _packetLog.clear();
-    _deniableCipher = null;
     _tripleDH = null;
     _status = SessionStatus.idle;
     notifyListeners();
+  }
+
+  /// Cleanly reset disconnected state back to idle standby
+  Future<void> resetToIdle() async {
+    await leaveRoom();
   }
 }

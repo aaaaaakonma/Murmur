@@ -2,24 +2,75 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // Helper functions for anti-bot, rate limiting & schema validation
+    function isValidId(id) {
+      return id is string && id.size() >= 8 && id.size() <= 64;
+    }
+
+    function isReasonableSize(doc, maxFields) {
+      return doc.keys().size() <= maxFields;
+    }
+
+    function isValidSdp(sdp) {
+      return sdp is string && sdp.size() > 0 && sdp.size() <= 16384;
+    }
+
+    function isValidCandidate(cand) {
+      return cand is string && cand.size() > 0 && cand.size() <= 1024;
+    }
+
+    function isValidTimestamp(ts) {
+      return ts is timestamp && ts <= request.time;
+    }
+
     // Disposable Addresses & Rendezvous Calling
     match /addresses/{addressId} {
       // 1. Prevent enumeration/scraping of all addresses
       allow list: if false;
 
-      // 2. Allow looking up or registering an address
-      allow get, create, update, delete: if true;
+      // 2. Validate address registration / updates with anti-bot checks
+      allow get: if isValidId(addressId);
+
+      allow create, update: if isValidId(addressId)
+        && isReasonableSize(request.resource.data, 8)
+        && (request.resource.data.status == null || request.resource.data.status in ['listening', 'active', 'busy'])
+        && (request.resource.data.lastActive == null || request.resource.data.lastActive is timestamp || request.resource.data.lastActive <= request.time)
+        && (request.resource.data.powNonce == null || request.resource.data.powNonce is int);
+
+      allow delete: if isValidId(addressId);
 
       // 3. Subcollection for incoming/outgoing calls under an address
       match /calls/{callId} {
-        allow read, write: if true;
+        allow get: if isValidId(callId);
+        // List query needed for address listeners: .where('status', '==', 'calling')
+        allow list: if true;
+
+        allow create: if isValidId(callId)
+          && isReasonableSize(request.resource.data, 10)
+          && request.resource.data.status in ['calling', 'connected', 'ended']
+          && request.resource.data.offer != null
+          && isValidSdp(request.resource.data.offer.sdp)
+          && (request.resource.data.createdAt == null || request.resource.data.createdAt is timestamp);
+
+        allow update: if isValidId(callId)
+          && isReasonableSize(request.resource.data, 10)
+          && request.resource.data.status in ['calling', 'connected', 'ended']
+          && (request.resource.data.answer == null || isValidSdp(request.resource.data.answer.sdp));
+
+        allow delete: if isValidId(callId);
 
         match /callerCandidates/{candidateId} {
-          allow read, write: if true;
+          allow read: if true;
+          allow create: if isReasonableSize(request.resource.data, 6)
+            && isValidCandidate(request.resource.data.candidate);
+          allow delete: if true;
         }
 
         match /calleeCandidates/{candidateId} {
-          allow read, write: if true;
+          allow read: if true;
+          allow create: if isReasonableSize(request.resource.data, 6)
+            && isValidCandidate(request.resource.data.candidate);
+          allow delete: if true;
         }
       }
     }
@@ -27,14 +78,34 @@ service cloud.firestore {
     // Direct room signaling support
     match /rooms/{roomId} {
       allow list: if false;
-      allow get, create, update, delete: if true;
+      allow get: if isValidId(roomId);
+
+      allow create: if isValidId(roomId)
+        && isReasonableSize(request.resource.data, 10)
+        && request.resource.data.status in ['waiting', 'connected', 'ended']
+        && request.resource.data.offer != null
+        && isValidSdp(request.resource.data.offer.sdp)
+        && (request.resource.data.createdAt == null || request.resource.data.createdAt is timestamp);
+
+      allow update: if isValidId(roomId)
+        && isReasonableSize(request.resource.data, 10)
+        && request.resource.data.status in ['waiting', 'connected', 'ended']
+        && (request.resource.data.answer == null || isValidSdp(request.resource.data.answer.sdp));
+
+      allow delete: if isValidId(roomId);
 
       match /callerCandidates/{candidateId} {
-        allow read, write: if true;
+        allow read: if true;
+        allow create: if isReasonableSize(request.resource.data, 6)
+          && isValidCandidate(request.resource.data.candidate);
+        allow delete: if true;
       }
 
       match /calleeCandidates/{candidateId} {
-        allow read, write: if true;
+        allow read: if true;
+        allow create: if isReasonableSize(request.resource.data, 6)
+          && isValidCandidate(request.resource.data.candidate);
+        allow delete: if true;
       }
     }
   }

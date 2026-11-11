@@ -92,8 +92,8 @@ class DeniableCipher {
     return {'enc': encKey, 'mac': macKey};
   }
 
-  /// Encrypt a new message and publish any pending MAC keys from previous messages
-  Future<DeniablePacket> encryptMessage(String plaintext) async {
+  /// Encrypt arbitrary bytes (e.g. file chunk) and publish any pending MAC keys
+  Future<DeniablePacket> encryptBytes(List<int> bytes) async {
     _sendSeq++;
     final currentSeq = _sendSeq;
 
@@ -102,8 +102,7 @@ class DeniableCipher {
     final macKey = keys['mac']!;
 
     // Encrypt with AES-GCM
-    final plaintextBytes = utf8.encode(plaintext);
-    final secretBox = await aesGcm.encrypt(plaintextBytes, secretKey: encKey);
+    final secretBox = await aesGcm.encrypt(bytes, secretKey: encKey);
 
     // Compute outer symmetric HMAC-SHA256 over nonce + ciphertext + GCM tag
     final hmac = Hmac.sha256();
@@ -117,12 +116,12 @@ class DeniableCipher {
       secretKey: macKey,
     );
 
-    // Attach pending disclosed MAC keys from earlier messages
+    // Attach pending disclosed MAC keys from earlier packets
     final disclosuresToSend = List<DisclosedMacKey>.from(_pendingMacDisclosures);
     publishedKeysLog.addAll(disclosuresToSend);
     _pendingMacDisclosures.clear();
 
-    // Queue current message's MAC key to be revealed in the NEXT packet
+    // Queue current packet's MAC key to be revealed in the NEXT packet
     final macBytes = await macKey.extractBytes();
     _pendingMacDisclosures.add(
       DisclosedMacKey(
@@ -142,8 +141,12 @@ class DeniableCipher {
     );
   }
 
-  /// Decrypt incoming packet, verify symmetric HMAC, and record disclosed MAC keys
-  Future<String> decryptMessage(DeniablePacket packet) async {
+  /// Encrypt a new message string and publish any pending MAC keys
+  Future<DeniablePacket> encryptMessage(String plaintext) =>
+      encryptBytes(utf8.encode(plaintext));
+
+  /// Decrypt incoming packet to raw bytes, verify symmetric HMAC, and record disclosed MAC keys
+  Future<List<int>> decryptBytes(DeniablePacket packet) async {
     // Record peer's disclosed MAC keys
     publishedKeysLog.addAll(packet.disclosedMacKeys);
 
@@ -173,8 +176,13 @@ class DeniableCipher {
       nonce: nonce,
       mac: Mac(gcmTag),
     );
-    final decryptedBytes = await aesGcm.decrypt(secretBox, secretKey: encKey);
-    return utf8.decode(decryptedBytes);
+    return await aesGcm.decrypt(secretBox, secretKey: encKey);
+  }
+
+  /// Decrypt incoming packet to UTF-8 plaintext string
+  Future<String> decryptMessage(DeniablePacket packet) async {
+    final bytes = await decryptBytes(packet);
+    return utf8.decode(bytes);
   }
 
   /// Release any un-disclosed MAC keys (e.g. at end of session)
