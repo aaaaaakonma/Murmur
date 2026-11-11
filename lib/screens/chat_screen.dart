@@ -8,7 +8,9 @@ import 'package:file_picker/file_picker.dart';
 import '../services/file_download_helper.dart';
 import '../services/p2p_chat_service.dart';
 import '../services/signaling_service.dart';
+import '../crypto/triple_dh.dart';
 import '../widgets/deniable_packet_inspector.dart';
+import '../widgets/triple_dh_inspector_dialog.dart';
 
 class ChatScreen extends StatefulWidget {
   final P2PChatService chatService;
@@ -35,8 +37,21 @@ class _ChatScreenState extends State<ChatScreen> {
   String _activeSidebarTab = 'channels'; // 'channels', 'telemetry', 'security'
   bool _isPurged = false;
   bool _isConnecting = false;
+  bool _is3DhLogsExpanded = false;
   double _latency = 18.2;
   Timer? _latencyTimer;
+
+  void _showTripleDhInspector() {
+    showDialog(
+      context: context,
+      builder: (ctx) => TripleDhInspectorDialog(
+        telemetry: widget.chatService.tripleDhTelemetry,
+        logs: widget.chatService.tripleDhLogs,
+        isSecure: widget.chatService.isPresenceActive,
+        isInRoom: widget.chatService.roomId != null,
+      ),
+    );
+  }
 
   @override
   void initState() {
@@ -1449,9 +1464,75 @@ class _ChatScreenState extends State<ChatScreen> {
         );
 
       case 'telemetry':
+        final t = widget.chatService.tripleDhTelemetry;
+        final logs = widget.chatService.tripleDhLogs;
+        final isInRoom = widget.chatService.roomId != null;
+
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // 3DH Key Exchange Telemetry Section
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  '3DH HANDSHAKE TELEMETRY',
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.8,
+                    color: Color(0xFF71717A),
+                  ),
+                ),
+                InkWell(
+                  onTap: _showTripleDhInspector,
+                  child: const Text(
+                    'Inspect Logs',
+                    style: TextStyle(
+                      fontFamily: 'JetBrains Mono',
+                      fontSize: 10,
+                      color: Color(0xFF38BDF8),
+                      decoration: TextDecoration.underline,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            _buildTelemetryRow(
+              '3DH Latency',
+              t != null && t.isCompleted
+                  ? '${t.totalHandshakeLatencyMs.toStringAsFixed(1)} ms'
+                  : (isInRoom ? 'Negotiating...' : 'Standby'),
+            ),
+            _buildTelemetryRow(
+              'Crypto Compute',
+              t != null ? '${t.cryptoComputeTimeMs.toStringAsFixed(2)} ms' : '0.00 ms',
+            ),
+            _buildTelemetryRow(
+              'Ephemeral Keygen',
+              t != null ? '${t.ephemeralGenTimeMs.toStringAsFixed(2)} ms' : '0.00 ms',
+            ),
+            _buildTelemetryRow(
+              '3DH Multiplications',
+              t != null ? '${(t.dh1TimeMs + t.dh2TimeMs + t.dh3TimeMs).toStringAsFixed(2)} ms' : '0.00 ms',
+            ),
+            _buildTelemetryRow(
+              'HKDF-SHA256',
+              t != null ? '${t.hkdfTimeMs.toStringAsFixed(2)} ms' : '0.00 ms',
+            ),
+            _buildTelemetryRow(
+              'Wire Transit',
+              t?.wireTransitLatencyMs != null
+                  ? '${t!.wireTransitLatencyMs!.toStringAsFixed(1)} ms'
+                  : (t != null && t.isCompleted ? '< 1 ms' : 'N/A'),
+            ),
+            _buildTelemetryRow(
+              'Handshake State',
+              isSecure ? 'VERIFIED' : (isInRoom ? 'EXCHANGING' : 'IDLE'),
+            ),
+
+            const SizedBox(height: 16),
             const Text(
               'LINK TELEMETRY',
               style: TextStyle(
@@ -1475,10 +1556,101 @@ class _ChatScreenState extends State<ChatScreen> {
               '${widget.chatService.publishedKeysLog.length} keys',
             ),
             _buildTelemetryRow('Memory Buffer', 'Non-swappable pinned RAM'),
+
+            const SizedBox(height: 16),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  '3DH RECENT EVENT LOG',
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.8,
+                    color: Color(0xFF71717A),
+                  ),
+                ),
+                Text(
+                  '${logs.length} events',
+                  style: const TextStyle(
+                    fontFamily: 'JetBrains Mono',
+                    fontSize: 9,
+                    color: Color(0xFF52525B),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: const Color(0xFF09090C),
+                borderRadius: BorderRadius.circular(3),
+                border: Border.all(color: const Color(0xFF1F1F23)),
+              ),
+              child: logs.isEmpty
+                  ? const Text(
+                      'No connection logs recorded.',
+                      style: TextStyle(
+                        fontFamily: 'JetBrains Mono',
+                        fontSize: 10,
+                        color: Color(0xFF52525B),
+                      ),
+                    )
+                  : Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        ...logs.reversed.take(4).toList().reversed.map((l) => Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 2),
+                              child: Row(
+                                children: [
+                                  Text(
+                                    '[${l.stage}]',
+                                    style: const TextStyle(
+                                      fontFamily: 'JetBrains Mono',
+                                      fontSize: 8,
+                                      fontWeight: FontWeight.w600,
+                                      color: Color(0xFF38BDF8),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Expanded(
+                                    child: Text(
+                                      l.message,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        fontFamily: 'JetBrains Mono',
+                                        fontSize: 9,
+                                        color: Color(0xFFA1A1AA),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            )),
+                        const SizedBox(height: 6),
+                        Center(
+                          child: InkWell(
+                            onTap: _showTripleDhInspector,
+                            child: const Text(
+                              'View Full 3DH Connection Log',
+                              style: TextStyle(
+                                fontFamily: 'JetBrains Mono',
+                                fontSize: 9,
+                                color: Color(0xFF10B981),
+                                decoration: TextDecoration.underline,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+            ),
           ],
         );
 
       case 'security':
+        final t = widget.chatService.tripleDhTelemetry;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -1495,8 +1667,11 @@ class _ChatScreenState extends State<ChatScreen> {
             _buildSecurityFeatureCard(
               title: 'Triple-DH (3DH)',
               desc: 'Ephemeral + Identity keys exchanged over X25519. Provides forward secrecy and mutual authentication without server trust.',
-              status: isSecure ? 'ACTIVE' : 'NEGOTIATING',
+              status: isSecure
+                  ? 'ACTIVE • ${t != null && t.isCompleted ? "${t.totalHandshakeLatencyMs.toStringAsFixed(1)}ms" : "VERIFIED"}'
+                  : 'NEGOTIATING',
               isGreen: isSecure,
+              onTap: _showTripleDhInspector,
             ),
             const SizedBox(height: 8),
             _buildSecurityFeatureCard(
@@ -1551,8 +1726,9 @@ class _ChatScreenState extends State<ChatScreen> {
     required String desc,
     required String status,
     required bool isGreen,
+    VoidCallback? onTap,
   }) {
-    return Container(
+    final card = Container(
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         color: const Color(0xFF111113),
@@ -1595,9 +1771,29 @@ class _ChatScreenState extends State<ChatScreen> {
             desc,
             style: const TextStyle(color: Color(0xFF71717A), fontSize: 11, height: 1.4),
           ),
+          if (onTap != null) ...[
+            const SizedBox(height: 6),
+            const Text(
+              'Tap to inspect 3DH handshake telemetry & logs →',
+              style: TextStyle(
+                fontFamily: 'JetBrains Mono',
+                fontSize: 9,
+                color: Color(0xFF38BDF8),
+              ),
+            ),
+          ],
         ],
       ),
     );
+
+    if (onTap != null) {
+      return InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(2),
+        child: card,
+      );
+    }
+    return card;
   }
 
   // =========================================================================
@@ -1790,6 +1986,52 @@ class _ChatScreenState extends State<ChatScreen> {
                           ),
                         ),
                       ],
+                      // 3DH Latency Badge (Clickable to open full 3DH inspector)
+                      InkWell(
+                        onTap: _showTripleDhInspector,
+                        borderRadius: BorderRadius.circular(2),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          margin: const EdgeInsets.only(right: 8),
+                          decoration: BoxDecoration(
+                            color: isSecure
+                                ? const Color(0xFF064E3B).withValues(alpha: 0.35)
+                                : (isInRoom ? const Color(0xFF78350F).withValues(alpha: 0.3) : const Color(0xFF18181D)),
+                            borderRadius: BorderRadius.circular(2),
+                            border: Border.all(
+                              color: isSecure
+                                  ? const Color(0xFF059669)
+                                  : (isInRoom ? const Color(0xFFD97706) : const Color(0xFF27272A)),
+                            ),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.bolt,
+                                size: 11,
+                                color: isSecure
+                                    ? const Color(0xFF34D399)
+                                    : (isInRoom ? const Color(0xFFF59E0B) : const Color(0xFFA1A1AA)),
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                widget.chatService.tripleDhTelemetry != null && widget.chatService.tripleDhTelemetry!.isCompleted
+                                    ? '3DH: ${widget.chatService.tripleDhTelemetry!.totalHandshakeLatencyMs.toStringAsFixed(1)} ms'
+                                    : (isInRoom ? '3DH: Handshaking...' : '3DH: Standby'),
+                                style: TextStyle(
+                                  fontFamily: 'JetBrains Mono',
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w600,
+                                  color: isSecure
+                                      ? const Color(0xFF34D399)
+                                      : (isInRoom ? const Color(0xFFF59E0B) : const Color(0xFFA1A1AA)),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
                       Text(
                         isInRoom ? 'SCTP: ${_latency.toStringAsFixed(1)} ms' : 'SCTP: Idle',
                         style: const TextStyle(
@@ -1833,53 +2075,8 @@ class _ChatScreenState extends State<ChatScreen> {
                     controller: _scrollController,
                     padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
                     children: [
-                // Operational Handshake Notice
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF111113),
-                    border: Border.all(color: const Color(0xFF1F1F23)),
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                  child: Row(
-                    children: [
-                      Text(
-                        DateFormat('HH:mm:ss.SSS').format(DateTime.now()),
-                        style: const TextStyle(
-                          fontFamily: 'JetBrains Mono',
-                          fontSize: 10,
-                          color: Color(0xFF52525B),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF18181B),
-                          borderRadius: BorderRadius.circular(2),
-                        ),
-                        child: const Text(
-                          'SESSION INITIALIZED',
-                          style: TextStyle(
-                            fontFamily: 'JetBrains Mono',
-                            fontSize: 9,
-                            fontWeight: FontWeight.w600,
-                            letterSpacing: 0.6,
-                            color: Color(0xFFA1A1AA),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      const Expanded(
-                        child: Text(
-                          'Direct peer-to-peer data channel established. Initial Triple-DH keys exchanged in volatile memory.',
-                          style: TextStyle(color: Color(0xFF71717A), fontSize: 11),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 16),
+                // Operational 3DH Handshake & Latency Notice
+                _buildTripleDhHandshakeNotice(isSecure, isInRoom),
 
                 // If empty state
                 if (widget.chatService.messages.isEmpty) ...[
@@ -1896,6 +2093,374 @@ class _ChatScreenState extends State<ChatScreen> {
         // Docked Clinical Composer
         _buildDockedComposer(isSecure, peerName),
       ],
+    );
+  }
+
+  Widget _buildTripleDhHandshakeNotice(bool isSecure, bool isInRoom) {
+    final telemetry = widget.chatService.tripleDhTelemetry;
+    final logs = widget.chatService.tripleDhLogs;
+    final hasLatency = telemetry != null && telemetry.isCompleted;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF111114),
+        border: Border.all(
+          color: isSecure
+              ? const Color(0xFF059669).withValues(alpha: 0.5)
+              : const Color(0xFF1F1F23),
+        ),
+        borderRadius: BorderRadius.circular(3),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Banner Summary Header
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Wrap(
+              alignment: WrapAlignment.spaceBetween,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                // Left: Timestamp + Status badge + Protocol name
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      DateFormat('HH:mm:ss.SSS').format(telemetry?.completedAt ?? DateTime.now()),
+                      style: const TextStyle(
+                        fontFamily: 'JetBrains Mono',
+                        fontSize: 10,
+                        color: Color(0xFF52525B),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: isSecure
+                            ? const Color(0xFF064E3B).withValues(alpha: 0.5)
+                            : const Color(0xFF18181B),
+                        borderRadius: BorderRadius.circular(2),
+                        border: Border.all(
+                          color: isSecure ? const Color(0xFF059669) : const Color(0xFF27272A),
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            isSecure ? Icons.check_circle : Icons.sync,
+                            size: 10,
+                            color: isSecure ? const Color(0xFF34D399) : const Color(0xFFF59E0B),
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            isSecure ? '3DH VERIFIED' : (isInRoom ? 'EXCHANGING 3DH' : '3DH STANDBY'),
+                            style: TextStyle(
+                              fontFamily: 'JetBrains Mono',
+                              fontSize: 9,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 0.6,
+                              color: isSecure ? const Color(0xFF34D399) : const Color(0xFFA1A1AA),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    const Text(
+                      'X25519-3DH + HKDF',
+                      style: TextStyle(
+                        fontFamily: 'JetBrains Mono',
+                        fontSize: 10,
+                        color: Color(0xFF71717A),
+                      ),
+                    ),
+                  ],
+                ),
+
+                // Right: Latency pills + View logs button
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Latency Metric Pill
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      margin: const EdgeInsets.only(right: 6),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF141418),
+                        borderRadius: BorderRadius.circular(2),
+                        border: Border.all(color: const Color(0xFF27272A)),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.bolt, size: 11, color: Color(0xFF10B981)),
+                          const SizedBox(width: 4),
+                          Text(
+                            hasLatency
+                                ? '3DH Latency: ${telemetry.totalHandshakeLatencyMs.toStringAsFixed(1)} ms'
+                                : (isInRoom ? '3DH: Negotiating...' : '3DH: Standby'),
+                            style: const TextStyle(
+                              fontFamily: 'JetBrains Mono',
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                              color: Color(0xFFE4E4E7),
+                            ),
+                          ),
+                          if (hasLatency) ...[
+                            const SizedBox(width: 6),
+                            Text(
+                              '(Crypto: ${telemetry.cryptoComputeTimeMs.toStringAsFixed(2)}ms)',
+                              style: const TextStyle(
+                                fontFamily: 'JetBrains Mono',
+                                fontSize: 9,
+                                color: Color(0xFF38BDF8),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+
+                    // Expand/Collapse logs toggle button
+                    InkWell(
+                      onTap: () => setState(() => _is3DhLogsExpanded = !_is3DhLogsExpanded),
+                      borderRadius: BorderRadius.circular(2),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: _is3DhLogsExpanded ? const Color(0xFF27272A) : const Color(0xFF18181D),
+                          borderRadius: BorderRadius.circular(2),
+                          border: Border.all(color: const Color(0xFF27272A)),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              _is3DhLogsExpanded ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down,
+                              size: 13,
+                              color: const Color(0xFFA1A1AA),
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              _is3DhLogsExpanded ? 'Hide Logs' : 'Logs (${logs.length})',
+                              style: const TextStyle(
+                                fontFamily: 'JetBrains Mono',
+                                fontSize: 10,
+                                color: Color(0xFFA1A1AA),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+
+                    const SizedBox(width: 6),
+
+                    // Popout inspector dialog button
+                    InkWell(
+                      onTap: _showTripleDhInspector,
+                      borderRadius: BorderRadius.circular(2),
+                      child: Container(
+                        padding: const EdgeInsets.all(4),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF18181D),
+                          borderRadius: BorderRadius.circular(2),
+                          border: Border.all(color: const Color(0xFF27272A)),
+                        ),
+                        child: const Icon(
+                          Icons.open_in_new,
+                          size: 12,
+                          color: Color(0xFFA1A1AA),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+
+          // Inline Expanded Monospace Terminal Log Viewer
+          if (_is3DhLogsExpanded) ...[
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: const BoxDecoration(
+                color: Color(0xFF09090C),
+                border: Border(top: BorderSide(color: Color(0xFF1F1F23))),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        'TRIPLE-DH (3DH) CONNECTION AUDIT STREAM',
+                        style: TextStyle(
+                          fontFamily: 'JetBrains Mono',
+                          fontSize: 9,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.6,
+                          color: Color(0xFF71717A),
+                        ),
+                      ),
+                      InkWell(
+                        onTap: () {
+                          final text = logs.map((e) => e.toString()).join('\n');
+                          Clipboard.setData(ClipboardData(text: text));
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('3DH connection logs copied to clipboard'),
+                              backgroundColor: Color(0xFF10B981),
+                              duration: Duration(seconds: 2),
+                            ),
+                          );
+                        },
+                        child: const Text(
+                          'Copy All',
+                          style: TextStyle(
+                            fontFamily: 'JetBrains Mono',
+                            fontSize: 9,
+                            color: Color(0xFF38BDF8),
+                            decoration: TextDecoration.underline,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  if (logs.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 8),
+                      child: Text(
+                        'Awaiting peer connection initiation...',
+                        style: TextStyle(
+                          fontFamily: 'JetBrains Mono',
+                          fontSize: 10,
+                          color: Color(0xFF52525B),
+                        ),
+                      ),
+                    )
+                  else
+                    ...logs.map((log) => _buildInlineLogItem(log)),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInlineLogItem(TripleDhLogEntry entry) {
+    Color stageBg;
+    Color stageFg;
+
+    switch (entry.stage) {
+      case 'VERIFIED':
+        stageBg = const Color(0xFF064E3B);
+        stageFg = const Color(0xFF34D399);
+        break;
+      case 'DH_COMPUTE':
+      case 'DH_START':
+      case 'KEYGEN':
+      case 'KEYGEN_DONE':
+        stageBg = const Color(0xFF0C4A6E);
+        stageFg = const Color(0xFF38BDF8);
+        break;
+      case 'TX_HANDSHAKE':
+      case 'TX_SHARE':
+        stageBg = const Color(0xFF312E81);
+        stageFg = const Color(0xFF818CF8);
+        break;
+      case 'RX_HANDSHAKE':
+      case 'RX_SHARE':
+        stageBg = const Color(0xFF4C1D95);
+        stageFg = const Color(0xFFA78BFA);
+        break;
+      case 'DISCONNECTED':
+        stageBg = const Color(0xFF7F1D1D);
+        stageFg = const Color(0xFFF87171);
+        break;
+      default:
+        stageBg = const Color(0xFF27272A);
+        stageFg = const Color(0xFFA1A1AA);
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            entry.formattedTimestamp,
+            style: const TextStyle(
+              fontFamily: 'JetBrains Mono',
+              fontSize: 9,
+              color: Color(0xFF52525B),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+            decoration: BoxDecoration(
+              color: stageBg,
+              borderRadius: BorderRadius.circular(2),
+            ),
+            child: Text(
+              entry.stage,
+              style: TextStyle(
+                fontFamily: 'JetBrains Mono',
+                fontSize: 8,
+                fontWeight: FontWeight.w600,
+                color: stageFg,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  entry.message,
+                  style: const TextStyle(
+                    fontFamily: 'JetBrains Mono',
+                    fontSize: 9,
+                    color: Color(0xFFE4E4E7),
+                  ),
+                ),
+                if (entry.detail != null) ...[
+                  Text(
+                    entry.detail!,
+                    style: const TextStyle(
+                      fontFamily: 'JetBrains Mono',
+                      fontSize: 8,
+                      color: Color(0xFF71717A),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          if (entry.durationMs != null) ...[
+            const SizedBox(width: 6),
+            Text(
+              '+${entry.durationMs!.toStringAsFixed(1)}ms',
+              style: const TextStyle(
+                fontFamily: 'JetBrains Mono',
+                fontSize: 8,
+                color: Color(0xFF38BDF8),
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 

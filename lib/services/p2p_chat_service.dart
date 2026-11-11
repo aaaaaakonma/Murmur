@@ -126,6 +126,12 @@ class P2PChatService extends ChangeNotifier {
   IncomingCallRequest? _incomingCall;
   final Map<String, _IncomingFileAssembly> _incomingAssemblies = {};
 
+  final List<TripleDhLogEntry> _tripleDhLogs = [];
+  TripleDhTelemetry? _tripleDhTelemetry;
+  Stopwatch? _handshakeStopwatch;
+  DateTime? _handshakeStartTime;
+  int? _remoteHandshakeSentTimestamp;
+
   SessionStatus get status => _status;
   String? get roomId => _roomId;
   String? get errorMessage => _errorMessage;
@@ -135,6 +141,28 @@ class P2PChatService extends ChangeNotifier {
   List<UserAddress> get addresses => List.unmodifiable(_addresses);
   List<SavedContact> get contacts => List.unmodifiable(_contacts);
   IncomingCallRequest? get incomingCall => _incomingCall;
+  List<TripleDhLogEntry> get tripleDhLogs => List.unmodifiable(_tripleDhLogs);
+  TripleDhTelemetry? get tripleDhTelemetry => _tripleDhTelemetry;
+  double? get tripleDhLatencyMs => _tripleDhTelemetry?.totalHandshakeLatencyMs;
+
+  void addTripleDhLog({
+    required String stage,
+    required String message,
+    String? detail,
+    double? durationMs,
+    TripleDhLogLevel level = TripleDhLogLevel.info,
+  }) {
+    final entry = TripleDhLogEntry(
+      timestamp: DateTime.now(),
+      stage: stage,
+      message: message,
+      detail: detail,
+      durationMs: durationMs,
+      level: level,
+    );
+    _tripleDhLogs.add(entry);
+    debugPrint('[3DH][${entry.stage}] ${entry.message}${detail != null ? ' ($detail)' : ''}');
+  }
 
   bool get isVaultUnlocked => _vault.identityKeyPair != null;
   bool get isPresenceActive => _vault.isPresenceActive;
@@ -328,6 +356,16 @@ class P2PChatService extends ChangeNotifier {
       _isInitiator = true;
       _status = SessionStatus.signaling;
       _errorMessage = null;
+      _tripleDhLogs.clear();
+      _tripleDhTelemetry = null;
+      _handshakeStopwatch = null;
+      _handshakeStartTime = null;
+      _remoteHandshakeSentTimestamp = null;
+      addTripleDhLog(
+        stage: 'SIGNALING',
+        message: 'Calling peer endpoint $targetAddress as Initiator. Establishing WebRTC connection.',
+        level: TripleDhLogLevel.info,
+      );
       notifyListeners();
 
       _tripleDH = TripleDH(identityKeyPair: _vault.identityKeyPair!);
@@ -355,6 +393,16 @@ class P2PChatService extends ChangeNotifier {
       _status = SessionStatus.signaling;
       _errorMessage = null;
       _roomId = call.addressId;
+      _tripleDhLogs.clear();
+      _tripleDhTelemetry = null;
+      _handshakeStopwatch = null;
+      _handshakeStartTime = null;
+      _remoteHandshakeSentTimestamp = null;
+      addTripleDhLog(
+        stage: 'SIGNALING',
+        message: 'Answering inbound connection call on address ${call.addressId} as Responder.',
+        level: TripleDhLogLevel.info,
+      );
       notifyListeners();
 
       _tripleDH = TripleDH(identityKeyPair: _vault.identityKeyPair!);
@@ -401,6 +449,16 @@ class P2PChatService extends ChangeNotifier {
       _isInitiator = true;
       _status = SessionStatus.signaling;
       _errorMessage = null;
+      _tripleDhLogs.clear();
+      _tripleDhTelemetry = null;
+      _handshakeStopwatch = null;
+      _handshakeStartTime = null;
+      _remoteHandshakeSentTimestamp = null;
+      addTripleDhLog(
+        stage: 'SIGNALING',
+        message: 'Created room as Initiator (Alice). Signaling state active.',
+        level: TripleDhLogLevel.info,
+      );
       notifyListeners();
 
       _tripleDH = TripleDH(identityKeyPair: _vault.identityKeyPair!);
@@ -429,6 +487,16 @@ class P2PChatService extends ChangeNotifier {
       _status = SessionStatus.signaling;
       _errorMessage = null;
       _roomId = roomId;
+      _tripleDhLogs.clear();
+      _tripleDhTelemetry = null;
+      _handshakeStopwatch = null;
+      _handshakeStartTime = null;
+      _remoteHandshakeSentTimestamp = null;
+      addTripleDhLog(
+        stage: 'SIGNALING',
+        message: 'Joined room $roomId as Responder (Bob). Awaiting WebRTC data channel.',
+        level: TripleDhLogLevel.info,
+      );
       notifyListeners();
 
       _tripleDH = TripleDH(identityKeyPair: _vault.identityKeyPair!);
@@ -460,6 +528,13 @@ class P2PChatService extends ChangeNotifier {
     channel.onDataChannelState = (RTCDataChannelState state) {
       debugPrint('[P2P] RTCDataChannel state transition: $state');
       if (state == RTCDataChannelState.RTCDataChannelOpen) {
+        _handshakeStopwatch = Stopwatch()..start();
+        _handshakeStartTime = DateTime.now();
+        addTripleDhLog(
+          stage: 'SCTP_OPEN',
+          message: 'WebRTC SCTP DataChannel opened. Initiating 3DH protocol.',
+          level: TripleDhLogLevel.info,
+        );
         _status = SessionStatus.webrtcConnected;
         notifyListeners();
         _send3DHHandshake();
@@ -474,6 +549,13 @@ class P2PChatService extends ChangeNotifier {
 
     if (channel.state == RTCDataChannelState.RTCDataChannelOpen) {
       debugPrint('[P2P] RTCDataChannel was already OPEN! Sending 3DH handshake immediately...');
+      _handshakeStopwatch = Stopwatch()..start();
+      _handshakeStartTime = DateTime.now();
+      addTripleDhLog(
+        stage: 'SCTP_OPEN',
+        message: 'WebRTC SCTP DataChannel was already OPEN. Initiating 3DH protocol.',
+        level: TripleDhLogLevel.info,
+      );
       _status = SessionStatus.webrtcConnected;
       notifyListeners();
       _send3DHHandshake();
@@ -487,16 +569,45 @@ class P2PChatService extends ChangeNotifier {
     _status = SessionStatus.exchanging3DH;
     notifyListeners();
 
+    addTripleDhLog(
+      stage: 'KEYGEN',
+      message: 'Generating fresh ephemeral X25519 keypair for 3DH session...',
+      level: TripleDhLogLevel.crypto,
+    );
+
     final myEphemeralPub = await _tripleDH!.generateEphemeralKey();
     final myIdentityPub = await _vault.identityKeyPair!.extractPublicKey();
 
+    final myEphemeralPubHex = myEphemeralPub.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    final myIdentityPubHex = myIdentityPub.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    final keygenMs = _tripleDH!.lastEphemeralGenDuration != null
+        ? _tripleDH!.lastEphemeralGenDuration!.inMicroseconds / 1000.0
+        : 0.0;
+
+    addTripleDhLog(
+      stage: 'KEYGEN_DONE',
+      message: 'Generated ephemeral X25519 keypair in ${keygenMs.toStringAsFixed(2)} ms.',
+      detail: 'ek_local: 0x${myEphemeralPubHex.substring(0, 16)}...',
+      durationMs: keygenMs,
+      level: TripleDhLogLevel.crypto,
+    );
+
+    final sentAt = DateTime.now().millisecondsSinceEpoch;
     final handshakePayload = jsonEncode({
       'type': '3DH_HANDSHAKE',
       'ik': base64Encode(myIdentityPub.bytes),
       'ek': base64Encode(myEphemeralPub.bytes),
+      'timestamp': sentAt,
     });
 
     _dataChannel!.send(RTCDataChannelMessage(handshakePayload));
+
+    addTripleDhLog(
+      stage: 'TX_HANDSHAKE',
+      message: 'Transmitted 3DH_HANDSHAKE payload over SCTP data channel.',
+      detail: 'ik_local: 0x${myIdentityPubHex.substring(0, 12)}... | ek_local: 0x${myEphemeralPubHex.substring(0, 12)}...',
+      level: TripleDhLogLevel.info,
+    );
   }
 
   /// Handle incoming wire messages over RTCDataChannel
@@ -511,9 +622,31 @@ class P2PChatService extends ChangeNotifier {
           final remoteEKBytes = base64Decode(data['ek'] as String);
 
           _peerIdentityKeyHex = remoteIKBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+          final peerEphemeralKeyHex = remoteEKBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+          double? transitMs;
+          if (data['timestamp'] is num) {
+            _remoteHandshakeSentTimestamp = (data['timestamp'] as num).toInt();
+            transitMs = (DateTime.now().millisecondsSinceEpoch - _remoteHandshakeSentTimestamp!).clamp(0, 30000).toDouble();
+          }
+
+          addTripleDhLog(
+            stage: 'RX_HANDSHAKE',
+            message: 'Received 3DH_HANDSHAKE wire frame from peer.',
+            detail: 'Remote IK: 0x${_peerIdentityKeyHex!.substring(0, 12)}... | Remote EK: 0x${peerEphemeralKeyHex.substring(0, 12)}...${transitMs != null ? ' (Transit: ${transitMs.toStringAsFixed(1)} ms)' : ''}',
+            durationMs: transitMs,
+            level: TripleDhLogLevel.info,
+          );
 
           final remoteIK = SimplePublicKey(remoteIKBytes, type: KeyPairType.x25519);
           final remoteEK = SimplePublicKey(remoteEKBytes, type: KeyPairType.x25519);
+
+          addTripleDhLog(
+            stage: 'DH_START',
+            message: 'Computing 3DH scalar multiplications (${_isInitiator ? "Alice / Initiator" : "Bob / Responder"})...',
+            detail: 'DH1=DH(ik, EK) • DH2=DH(ek, IK) • DH3=DH(ek, EK)',
+            level: TripleDhLogLevel.crypto,
+          );
 
           // Compute Deniable Triple-DH Session Key
           SecretKey sessionKey;
@@ -529,22 +662,124 @@ class P2PChatService extends ChangeNotifier {
             );
           }
 
+          final timings = _tripleDH?.lastCryptoTimings;
+          addTripleDhLog(
+            stage: 'DH_COMPUTE',
+            message: 'Computed DH1, DH2, DH3 and HKDF-SHA256 in ${timings?.totalCryptoMs.toStringAsFixed(2) ?? "0"} ms.',
+            detail: 'DH1: ${timings?.dh1Ms.toStringAsFixed(2)}ms | DH2: ${timings?.dh2Ms.toStringAsFixed(2)}ms | DH3: ${timings?.dh3Ms.toStringAsFixed(2)}ms | HKDF: ${timings?.hkdfMs.toStringAsFixed(2)}ms',
+            durationMs: timings?.totalCryptoMs,
+            level: TripleDhLogLevel.crypto,
+          );
+
           _deniableCipher = DeniableCipher(sessionKey: sessionKey);
+
+          addTripleDhLog(
+            stage: 'CIPHER_READY',
+            message: 'Initialized Deniable AES-256-GCM cipher with OTR HMAC-SHA256 repudiation disclosure.',
+            level: TripleDhLogLevel.info,
+          );
+
+          // Record preliminary telemetry so crypto timings & transit are immediately visible
+          SimplePublicKey? myEphemeralPub;
+          if (_tripleDH?.ephemeralKeyPair != null) {
+            myEphemeralPub = await _tripleDH!.ephemeralKeyPair!.extractPublicKey();
+          }
+          SimplePublicKey? myIdPub;
+          if (_vault.identityKeyPair != null) {
+            myIdPub = await _vault.identityKeyPair!.extractPublicKey();
+          }
+
+          _tripleDhTelemetry = TripleDhTelemetry(
+            startedAt: _handshakeStartTime,
+            cryptoComputeTimeMs: timings?.totalCryptoMs ?? 0.0,
+            wireTransitLatencyMs: transitMs,
+            ephemeralGenTimeMs: timings?.ephemeralGenMs ?? 0.0,
+            dh1TimeMs: timings?.dh1Ms ?? 0.0,
+            dh2TimeMs: timings?.dh2Ms ?? 0.0,
+            dh3TimeMs: timings?.dh3Ms ?? 0.0,
+            hkdfTimeMs: timings?.hkdfMs ?? 0.0,
+            localEphemeralPubHex: myEphemeralPub?.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(),
+            remoteEphemeralPubHex: peerEphemeralKeyHex,
+            localIdentityPubHex: myIdPub?.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(),
+            remoteIdentityPubHex: _peerIdentityKeyHex,
+            isInitiator: _isInitiator,
+            isCompleted: false,
+          );
 
           // Step 2: Swap 2-of-2 cache shares over encrypted channel
           final sharePayload = jsonEncode({
             'type': 'SHARE_SWAP',
             'share': base64Encode(_vault.localShare!),
+            'timestamp': DateTime.now().millisecondsSinceEpoch,
           });
           _dataChannel?.send(RTCDataChannelMessage(sharePayload));
+
+          addTripleDhLog(
+            stage: 'TX_SHARE',
+            message: 'Transmitted local presence share s₁ (2-of-2 split vault) over encrypted channel.',
+            level: TripleDhLogLevel.info,
+          );
+          notifyListeners();
           break;
 
         case 'SHARE_SWAP':
           final remoteShare = base64Decode(data['share'] as String);
 
+          addTripleDhLog(
+            stage: 'RX_SHARE',
+            message: 'Received remote presence share s₂ over authenticated channel.',
+            level: TripleDhLogLevel.info,
+          );
+
           // Step 3: Reconstruct K = s1 XOR s2 in memory!
           _vault.activatePresence(remoteShare);
           _status = SessionStatus.presenceActivated;
+
+          if (_handshakeStopwatch != null && _handshakeStopwatch!.isRunning) {
+            _handshakeStopwatch!.stop();
+          }
+          final totalLatencyMs = _handshakeStopwatch != null
+              ? _handshakeStopwatch!.elapsedMicroseconds / 1000.0
+              : 0.0;
+          final timings = _tripleDH?.lastCryptoTimings;
+
+          SimplePublicKey? myEphemPub;
+          if (_tripleDH?.ephemeralKeyPair != null) {
+            myEphemPub = await _tripleDH!.ephemeralKeyPair!.extractPublicKey();
+          }
+          SimplePublicKey? myIdentityPub;
+          if (_vault.identityKeyPair != null) {
+            myIdentityPub = await _vault.identityKeyPair!.extractPublicKey();
+          }
+
+          _tripleDhTelemetry = TripleDhTelemetry(
+            startedAt: _handshakeStartTime,
+            completedAt: DateTime.now(),
+            totalHandshakeLatencyMs: totalLatencyMs,
+            cryptoComputeTimeMs: timings?.totalCryptoMs ?? 0.0,
+            wireTransitLatencyMs: (_remoteHandshakeSentTimestamp != null)
+                ? (DateTime.now().millisecondsSinceEpoch - _remoteHandshakeSentTimestamp!).clamp(0, 30000).toDouble()
+                : _tripleDhTelemetry?.wireTransitLatencyMs,
+            ephemeralGenTimeMs: timings?.ephemeralGenMs ?? 0.0,
+            dh1TimeMs: timings?.dh1Ms ?? 0.0,
+            dh2TimeMs: timings?.dh2Ms ?? 0.0,
+            dh3TimeMs: timings?.dh3Ms ?? 0.0,
+            hkdfTimeMs: timings?.hkdfMs ?? 0.0,
+            localEphemeralPubHex: myEphemPub?.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(),
+            remoteEphemeralPubHex: _tripleDhTelemetry?.remoteEphemeralPubHex,
+            localIdentityPubHex: myIdentityPub?.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(),
+            remoteIdentityPubHex: _peerIdentityKeyHex,
+            isInitiator: _isInitiator,
+            isCompleted: true,
+          );
+
+          addTripleDhLog(
+            stage: 'VERIFIED',
+            message: 'Triple-DH handshake verified & mutual presence activated!',
+            detail: 'Total Handshake Latency: ${totalLatencyMs.toStringAsFixed(2)} ms | Crypto Compute: ${timings?.totalCryptoMs.toStringAsFixed(2) ?? "0"} ms',
+            durationMs: totalLatencyMs,
+            level: TripleDhLogLevel.success,
+          );
 
           // Decrypt historical messages from disk into RAM
           await _decryptHistoricalMessages();
@@ -849,6 +1084,12 @@ class P2PChatService extends ChangeNotifier {
   }
 
   void _onDisconnected() {
+    addTripleDhLog(
+      stage: 'DISCONNECTED',
+      message: 'Peer connection closed. Ephemeral keys zeroized from volatile memory.',
+      level: TripleDhLogLevel.warning,
+    );
+
     // CRITICAL: Zeroize K and remote share s2 from memory immediately!
     _vault.zeroizeSession();
     _tripleDH?.zeroizeEphemeral();
@@ -869,6 +1110,96 @@ class P2PChatService extends ChangeNotifier {
     _packetLog.clear();
 
     _status = SessionStatus.disconnected;
+    notifyListeners();
+  }
+
+  /// Generates a simulated 3DH handshake telemetry event for testing and inspection
+  Future<void> simulate3DhHandshakeForTesting({
+    double simulatedLatencyMs = 24.5,
+  }) async {
+    addTripleDhLog(
+      stage: 'SCTP_OPEN',
+      message: 'WebRTC SCTP DataChannel opened. Initiating 3DH protocol.',
+      level: TripleDhLogLevel.info,
+    );
+    addTripleDhLog(
+      stage: 'KEYGEN',
+      message: 'Generating fresh ephemeral X25519 keypair for 3DH session...',
+      level: TripleDhLogLevel.crypto,
+    );
+    addTripleDhLog(
+      stage: 'KEYGEN_DONE',
+      message: 'Generated ephemeral X25519 keypair in 1.12 ms.',
+      detail: 'ek_local: 0x4a2fe7890b12cd56...',
+      durationMs: 1.12,
+      level: TripleDhLogLevel.crypto,
+    );
+    addTripleDhLog(
+      stage: 'TX_HANDSHAKE',
+      message: 'Transmitted 3DH_HANDSHAKE payload over SCTP data channel.',
+      detail: 'ik_local: 0x8f1b2c3d4e5f... | ek_local: 0x4a2fe7890b12...',
+      level: TripleDhLogLevel.info,
+    );
+    addTripleDhLog(
+      stage: 'RX_HANDSHAKE',
+      message: 'Received 3DH_HANDSHAKE wire frame from peer.',
+      detail: 'Remote IK: 0xe29ab81c34ef... | Remote EK: 0x1b4387d2ef09... (Transit: 18.2 ms)',
+      durationMs: 18.2,
+      level: TripleDhLogLevel.info,
+    );
+    addTripleDhLog(
+      stage: 'DH_START',
+      message: 'Computing 3DH scalar multiplications (Alice / Initiator)...',
+      detail: 'DH1=DH(ik, EK) • DH2=DH(ek, IK) • DH3=DH(ek, EK)',
+      level: TripleDhLogLevel.crypto,
+    );
+    addTripleDhLog(
+      stage: 'DH_COMPUTE',
+      message: 'Computed DH1, DH2, DH3 and HKDF-SHA256 in 3.45 ms.',
+      detail: 'DH1: 1.10ms | DH2: 1.05ms | DH3: 1.08ms | HKDF: 0.22ms',
+      durationMs: 3.45,
+      level: TripleDhLogLevel.crypto,
+    );
+    addTripleDhLog(
+      stage: 'CIPHER_READY',
+      message: 'Initialized Deniable AES-256-GCM cipher with OTR HMAC-SHA256 repudiation disclosure.',
+      level: TripleDhLogLevel.info,
+    );
+    addTripleDhLog(
+      stage: 'TX_SHARE',
+      message: 'Transmitted local presence share s₁ (2-of-2 split vault) over encrypted channel.',
+      level: TripleDhLogLevel.info,
+    );
+    addTripleDhLog(
+      stage: 'RX_SHARE',
+      message: 'Received remote presence share s₂ over authenticated channel.',
+      level: TripleDhLogLevel.info,
+    );
+    addTripleDhLog(
+      stage: 'VERIFIED',
+      message: 'Triple-DH handshake verified & mutual presence activated!',
+      detail: 'Total Handshake Latency: ${simulatedLatencyMs.toStringAsFixed(2)} ms | Crypto Compute: 3.45 ms',
+      durationMs: simulatedLatencyMs,
+      level: TripleDhLogLevel.success,
+    );
+    _tripleDhTelemetry = TripleDhTelemetry(
+      startedAt: DateTime.now().subtract(Duration(milliseconds: simulatedLatencyMs.toInt())),
+      completedAt: DateTime.now(),
+      totalHandshakeLatencyMs: simulatedLatencyMs,
+      cryptoComputeTimeMs: 3.45,
+      wireTransitLatencyMs: 18.2,
+      ephemeralGenTimeMs: 1.12,
+      dh1TimeMs: 1.10,
+      dh2TimeMs: 1.05,
+      dh3TimeMs: 1.08,
+      hkdfTimeMs: 0.22,
+      localEphemeralPubHex: '4a2fe7890b12cd56ef34a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5e6f',
+      remoteEphemeralPubHex: '1b4387d2ef0987654321fedcba0987654321fedcba0987654321fedcba098765',
+      localIdentityPubHex: '8f1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6',
+      remoteIdentityPubHex: 'e29ab81c34ef7654321fedcba0987654321fedcba0987654321fedcba0987654',
+      isInitiator: true,
+      isCompleted: true,
+    );
     notifyListeners();
   }
 
